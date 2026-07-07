@@ -1,0 +1,82 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Report {
+  id        String   @id            // reporter's report_id — natural dedupe key
+  org       String
+  domain    String
+  begin     DateTime
+  end       DateTime
+  policyP   String?
+  policySp  String?
+  policyPct String?
+  createdAt DateTime @default(now())
+  createdBy String                  // user email — audit
+  rows      ReportRow[]
+
+  @@index([domain, begin])
+  @@map("reports")
+}
+
+model ReportRow {
+  id          BigInt  @id @default(autoincrement())
+  reportId    String
+  report      Report  @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  sourceIp    String
+  count       Int
+  disposition String
+  peDkim      String
+  peSpf       String
+  headerFrom  String
+  spfRaw      Boolean
+  dkimRaw     Boolean
+  spfDom      String  @default("")
+  dkimDom     String  @default("")
+  sel         String  @default("")
+  reasons     String[] @default([])
+
+  @@index([reportId])
+  @@index([sourceIp])
+  @@map("report_rows")
+}
+
+model IpInfo {
+  ip        String   @id
+  org       String   @default("")
+  country   String   @default("")
+  cc        String   @default("")
+  service   String   @default("")
+  ptr        String   @default("")
+  manual    Boolean  @default(false) // manual overrides never overwritten by enrichment
+  updatedAt DateTime @updatedAt
+
+  @@map("ip_info")
+}
+
+model PublishedRecord {
+  domain    String   @id
+  dmarc     String?                 // null = not recorded, "" = confirmed none
+  bimi      String?
+  recorded  DateTime @default(now())
+  updatedBy String
+
+  @@map("published_records")
+}
+
+model AuditLog {
+  id        BigInt   @id @default(autoincrement())
+  at        DateTime @default(now())
+  userEmail String
+  action    String                  // e.g. report.upload, ipinfo.enrich, record.update
+  detail    Json
+
+  @@index([at])
+  @@map("audit_log")
+}

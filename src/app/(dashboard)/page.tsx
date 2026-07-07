@@ -1,0 +1,904 @@
+"use client";
+
+// src/app/(dashboard)/page.tsx
+// Ported from the Claude artifact dashboard. Data now lives in Postgres via the API:
+//   GET  /api/data           → reports, rows, ipInfo
+//   POST /api/reports        → upload parsed reports
+//   POST /api/enrich         → server-side IP enrichment
+//   POST /api/import-backup  → artifact backup JSON
+// Delete src/app/page.tsx so this (dashboard) route group serves "/".
+
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
+import { Upload, Shield, CheckCircle2, AlertTriangle, XCircle, Globe, FileText, Download, RefreshCw, Sparkles, ChevronRight, ChevronDown, ExternalLink, TrendingUp, TrendingDown, Minus, Wrench, ClipboardList, FileDown, LogOut } from "lucide-react";
+import { classifyRow, fixHint, MANUAL_IPINFO, type TrimmedRow, type ParsedReport } from "@/lib/dmarc";
+import { extractXml, parseReport } from "@/lib/dmarc-client";
+import { supabaseBrowser } from "@/lib/supabase-browser";
+
+// ---------- portfolio constants (same as the artifact) ----------
+const PORTFOLIO = ["spheredrones.com.au", "spheregroup.com.au", "curouav.com", "sidero.com.au", "parisradio.com.au"];
+
+type PublishedRecord = { recorded: string; dmarc: string | null; bimi: string | null };
+const PUBLISHED_RECORDS: Record<string, PublishedRecord> = {
+  "spheredrones.com.au": {
+    recorded: "2026-07-01",
+    dmarc: "v=DMARC1;p=reject;pct=100;rua=mailto:dmarc-reports@spheredrones.com.au,mailto:josh@spheredrones.com.au;ruf=mailto:dmarc-reports@spheredrones.com.au,mailto:josh@spheredrones.com.au;ri=10800;fo=1;",
+    bimi: "v=BIMI1; l=https://cdn.prod.website-files.com/667cf0e5d33cd95d355e2846/6a20d432f283f63e743aed51_sphere-bimi-white.svg; a=; avp=personal;",
+  },
+  "spheregroup.com.au": { recorded: "2026-07-01", dmarc: "v=DMARC1;p=reject;pct=100;rua=mailto:3a78b6059e@rua.easydmarc.com,mailto:dmarc-reports@spheredrones.com.au;ruf=mailto:3a78b6059e@ruf.easydmarc.com,mailto:dmarc-reports@spheredrones.com.au;ri=10800;fo=1;", bimi: "" },
+  "curouav.com": { recorded: "2026-07-01", dmarc: "", bimi: "" },
+  "sidero.com.au": { recorded: "2026-07-01", dmarc: "v=DMARC1; p=none", bimi: "" },
+  "parisradio.com.au": { recorded: "2026-07-01", dmarc: "", bimi: "" },
+};
+
+const DNS_ACTIONS: { domain: string; records: { host: string; type: string; value: string; why: string }[] }[] = [
+  { domain: "curouav.com", records: [
+    { host: "_dmarc.curouav.com", type: "TXT", value: "v=DMARC1;p=none;rua=mailto:3a78b6059e@rua.au.easydmarc.com,mailto:dmarc-reports@spheredrones.com.au;fo=1;", why: "Start monitoring — no DMARC record exists today. Delivery to the spheredrones mailbox is already authorised." },
+  ]},
+  { domain: "parisradio.com.au", records: [
+    { host: "_dmarc.parisradio.com.au", type: "TXT", value: "v=DMARC1;p=none;rua=mailto:dmarc-reports@spheredrones.com.au;fo=1;", why: "Start monitoring — no DMARC record exists today. Delivery to the spheredrones mailbox is already authorised." },
+  ]},
+  { domain: "sidero.com.au", records: [
+    { host: "_dmarc.sidero.com.au", type: "TXT", value: "v=DMARC1;p=none;rua=mailto:dmarc-reports@spheredrones.com.au;fo=1;", why: "Currently p=none with no rua — add reporting now; step to quarantine, then reject, after a clean period." },
+  ]},
+];
+
+// ---------- types ----------
+type ApiRow = TrimmedRow & { reportId: string; org: string; policyDomain: string; begin: number; end: number };
+type ApiReport = { id: string; org: string; domain: string; begin: number; end: number; policyP: string | null; policySp: string | null; policyPct: string | null };
+type IpMeta = { org: string; country: string; cc: string; service: string };
+
+// ---------- helpers ----------
+const REASON_LABELS: Record<string, string> = { forwarded: "Forwarded", sampled_out: "Sampled out", trusted_forwarder: "Trusted forwarder", mailing_list: "Mailing list", local_policy: "Local policy", arc: "ARC (forwarding)", other: "Other" };
+const C = { pass: "#16a34a", fail: "#dc2626", quarantine: "#d97706", none: "#64748b", misaligned: "#d97706", unauth: "#dc2626" };
+const DELIVERY: Record<string, string> = { none: "Delivered", quarantine: "Quarantined", reject: "Rejected" };
+const TABS = [
+  { key: "compliant", label: "Compliant", badge: "bg-green-100 text-green-700" },
+  { key: "noncompliant", label: "Non-compliant", badge: "bg-amber-100 text-amber-700" },
+  { key: "threat", label: "Threat / Unknown", badge: "bg-red-100 text-red-700" },
+  { key: "forwarded", label: "Forwarded", badge: "bg-slate-100 text-slate-600" },
+] as const;
+type TabKey = (typeof TABS)[number]["key"];
+
+const domainOf = (r: ApiRow) => r.policyDomain || r.headerFrom || "—";
+const tagOf = (rec: string, tag: string) => rec.match(new RegExp(tag + "=([^;]*)"))?.[1]?.trim() ?? "";
+const mxUrl = (type: string, d: string) => `https://mxtoolbox.com/SuperTool.aspx?action=${type}%3a${encodeURIComponent(d)}&run=toolpage`;
+const top = (o: Record<string, number>) => Object.entries(o).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+
+function downloadBlob(content: string, name: string, type: string) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name; a.style.display = "none";
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// ---------- small components ----------
+function Flag({ cc }: { cc: string }) {
+  const [failed, setFailed] = useState(false);
+  if (!cc || cc.length !== 2 || cc === "??") return null;
+  if (failed) return <span className="inline-block shrink-0 rounded bg-slate-200 px-1 text-[9px] font-bold leading-4 text-slate-600" title={cc}>{cc.toUpperCase()}</span>;
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={`https://flagcdn.com/16x12/${cc.toLowerCase()}.png`} srcSet={`https://flagcdn.com/32x24/${cc.toLowerCase()}.png 2x`}
+      width={16} height={12} alt={cc} title={cc} className="inline-block shrink-0 rounded-[1px]" onError={() => setFailed(true)} />
+  );
+}
+
+function Card({ label, value, sub, tone = "slate" }: { label: string; value: React.ReactNode; sub?: string; tone?: "slate" | "green" | "red" | "amber" | "indigo" }) {
+  const tones = { slate: "text-slate-900", green: "text-green-600", red: "text-red-600", amber: "text-amber-600", indigo: "text-indigo-600" };
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</div>
+      <div className={`mt-1 text-2xl font-semibold ${tones[tone]}`}>{value}</div>
+      {sub && <div className="mt-0.5 text-xs text-slate-400">{sub}</div>}
+    </div>
+  );
+}
+
+function StatBar({ label, value, total, color, hint }: { label: React.ReactNode; value: number; total: number; color: string; hint?: string }) {
+  const pct = total ? Math.round((value / total) * 100) : 0;
+  return (
+    <div>
+      <div className="mb-0.5 flex items-baseline justify-between text-xs">
+        <span className="text-slate-600">{label}{hint && <span className="text-slate-400"> · {hint}</span>}</span>
+        <span className="tabular-nums text-slate-500">{value.toLocaleString()} · {pct}%</span>
+      </div>
+      <div className="h-1.5 rounded-full bg-slate-100"><div className="h-1.5 rounded-full" style={{ width: pct + "%", background: color }} /></div>
+    </div>
+  );
+}
+
+function Panel({ title, children, icon: Icon, right }: { title: string; children: React.ReactNode; icon?: React.ComponentType<{ size?: number }>; right?: React.ReactNode }) {
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-700">{Icon && <Icon size={16} />}{title}</h2>
+        {right}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function PctBar({ pct }: { pct: number }) {
+  const color = pct >= 90 ? "#16a34a" : pct >= 50 ? "#d97706" : "#dc2626";
+  return (
+    <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+      <span className="text-xs font-medium tabular-nums" style={{ color }}>{pct}%</span>
+      <span className="inline-block h-1.5 w-20 rounded-full bg-slate-100 align-middle sm:w-28"><span className="block h-1.5 rounded-full" style={{ width: pct + "%", background: color }} /></span>
+    </span>
+  );
+}
+
+function Auth({ result }: { result: string }) {
+  const ok = result === "pass" || result === "aligned";
+  const partial = result === "partial";
+  const label = ({ pass: "Pass", aligned: "Aligned", fail: "Fail", partial: "Partial" } as Record<string, string>)[result] ?? "—";
+  return <span className={`inline-flex items-center gap-1 whitespace-nowrap text-xs ${ok ? "text-green-700" : partial ? "text-amber-700" : "text-slate-400"}`}>
+    <span className={`h-1.5 w-1.5 rounded-full ${ok ? "bg-green-500" : partial ? "bg-amber-500" : "bg-slate-300"}`} />{label}
+  </span>;
+}
+
+function StatusChip({ label, value }: { label: string; value: string | null | undefined }) {
+  const status = value === "" ? "none" : value == null ? "unknown" : "present";
+  const cls = { present: "bg-green-100 text-green-700", none: "bg-amber-100 text-amber-700", unknown: "bg-slate-100 text-slate-500" }[status];
+  const text = { present: "on file", none: "none", unknown: "not recorded" }[status];
+  return <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${cls}`}>{label}: {text}</span>;
+}
+
+function Delta({ now, prev, invert = false, suffix = "" }: { now: number; prev: number | null; invert?: boolean; suffix?: string }) {
+  if (prev == null) return <span className="inline-flex items-center gap-0.5 text-xs text-slate-400"><Minus size={12} /> no prior week</span>;
+  const diff = now - prev;
+  if (diff === 0) return <span className="inline-flex items-center gap-0.5 text-xs text-slate-400"><Minus size={12} /> unchanged</span>;
+  const up = diff > 0;
+  const good = invert ? !up : up;
+  return <span className={`inline-flex items-center gap-0.5 text-xs font-medium ${good ? "text-green-600" : "text-red-600"}`}>
+    {up ? <TrendingUp size={12} /> : <TrendingDown size={12} />}{up ? "+" : ""}{diff.toLocaleString()}{suffix} vs prior week
+  </span>;
+}
+
+// ---------- page ----------
+export default function DashboardPage() {
+  const [rows, setRows] = useState<ApiRow[]>([]);
+  const [reports, setReports] = useState<ApiReport[]>([]);
+  const [ipInfo, setIpInfo] = useState<Record<string, IpMeta>>({});
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [drag, setDrag] = useState(false);
+  const [enriching, setEnriching] = useState(false);
+  const [enrichPct, setEnrichPct] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [tab, setTab] = useState<TabKey>("compliant");
+  const [openSrc, setOpenSrc] = useState<Record<string, boolean>>({});
+  const [closedDoms, setClosedDoms] = useState<Record<string, boolean>>({});
+  const [domain, setDomain] = useState<string>("all");
+  const [showDns, setShowDns] = useState(false);
+  const [summaryText, setSummaryText] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const refreshData = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const res = await fetch("/api/data");
+      if (res.ok) {
+        const d = (await res.json()) as { rows: ApiRow[]; reports: ApiReport[]; ipInfo: Record<string, IpMeta> };
+        setRows(d.rows); setReports(d.reports); setIpInfo({ ...d.ipInfo, ...MANUAL_IPINFO });
+      } else if (res.status === 401 || res.status === 403) {
+        window.location.href = "/login";
+      }
+    } catch (e) { console.error(e); }
+    setRefreshing(false);
+  }, []);
+  useEffect(() => { void (async () => { await refreshData(); setLoaded(true); })(); }, [refreshData]);
+
+  const signOut = async () => {
+    await supabaseBrowser().auth.signOut();
+    window.location.href = "/login";
+  };
+
+  // ---------- upload ----------
+  const handleFiles = useCallback(async (files: File[]) => {
+    setBusy(true); setMsg(null);
+    let backupImported = 0, errored = 0;
+    const parsedReports: ParsedReport[] = [];
+    for (const file of files) {
+      if (/\.json$/i.test(file.name)) {
+        try {
+          const res = await fetch("/api/import-backup", { method: "POST", headers: { "Content-Type": "application/json" }, body: await file.text() });
+          if (res.ok) { const d = (await res.json()) as { added: number }; backupImported += d.added; }
+          else errored++;
+        } catch { errored++; }
+        continue;
+      }
+      try {
+        for (const xml of await extractXml(file)) parsedReports.push(parseReport(xml));
+      } catch { errored++; }
+    }
+    let added = 0, skipped = 0;
+    if (parsedReports.length) {
+      try {
+        const res = await fetch("/api/reports", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reports: parsedReports }) });
+        if (res.ok) { const d = (await res.json()) as { added: number; skipped: number }; added = d.added; skipped = d.skipped; }
+        else errored++;
+      } catch { errored++; }
+    }
+    await refreshData();
+    setBusy(false);
+    const parts: string[] = [];
+    if (added) parts.push(`imported ${added} report${added !== 1 ? "s" : ""}`);
+    if (backupImported) parts.push(`restored ${backupImported} from backup`);
+    if (skipped) parts.push(`skipped ${skipped} duplicate${skipped !== 1 ? "s" : ""} already in the dataset`);
+    if (errored) parts.push(`${errored} file${errored !== 1 ? "s" : ""} failed`);
+    setMsg(parts.length ? parts.join(", ").replace(/^./, (c) => c.toUpperCase()) + "." : "Nothing new to import — already in the dataset.");
+  }, [refreshData]);
+
+  const onDrop = (e: React.DragEvent) => { e.preventDefault(); setDrag(false); if (e.dataTransfer.files?.length) void handleFiles([...e.dataTransfer.files]); };
+
+  // ---------- filtering ----------
+  const domainVolumes = useMemo(() => {
+    const v: Record<string, number> = {};
+    for (const r of rows) v[domainOf(r)] = (v[domainOf(r)] ?? 0) + r.count;
+    return v;
+  }, [rows]);
+  const domainList = useMemo(() => [...PORTFOLIO, ...Object.keys(domainVolumes).filter((d) => !PORTFOLIO.includes(d) && d !== "—")], [domainVolumes]);
+  const view = useMemo(() => (domain === "all" ? rows : rows.filter((r) => domainOf(r) === domain)), [rows, domain]);
+
+  // ---------- metrics ----------
+  const m = useMemo(() => {
+    let total = 0, dmarcPass = 0, spfPass = 0, dkimPass = 0, minD = Infinity, maxD = -Infinity;
+    let failTotal = 0, misaligned = 0, unauth = 0;
+    const ips = new Set<string>(), reportIds = new Set<string>();
+    const byDay: Record<string, { day: string; pass: number; fail: number }> = {};
+    const disp: Record<string, number> = { none: 0, quarantine: 0, reject: 0 };
+    const reasons: Record<string, number> = {};
+    const byReceiver: Record<string, { name: string; count: number; pass: number }> = {};
+    const selectors: Record<string, { name: string; count: number; pass: number; lastSeen: number }> = {};
+    const firstSeen: Record<string, number> = {};
+    const threatByDay: Record<string, number> = {};
+    for (const r of view) {
+      total += r.count; ips.add(r.sourceIp); reportIds.add(r.reportId);
+      const pass = r.peDkim === "pass" || r.peSpf === "pass";
+      if (pass) dmarcPass += r.count;
+      if (r.peSpf === "pass") spfPass += r.count;
+      if (r.peDkim === "pass") dkimPass += r.count;
+      if (r.begin < minD) minD = r.begin;
+      if (r.end > maxD) maxD = r.end;
+      const day = new Date(r.begin).toISOString().slice(0, 10);
+      byDay[day] = byDay[day] ?? { day, pass: 0, fail: 0 };
+      byDay[day][pass ? "pass" : "fail"] += r.count;
+      disp[r.disposition] = (disp[r.disposition] ?? 0) + r.count;
+      if (!pass) {
+        failTotal += r.count;
+        if (r.spfRaw || r.dkimRaw) misaligned += r.count;
+        else { unauth += r.count; threatByDay[day] = (threatByDay[day] ?? 0) + r.count; }
+      }
+      [...new Set(r.reasons ?? [])].forEach((t) => { reasons[t] = (reasons[t] ?? 0) + r.count; });
+      const rc = byReceiver[r.org] ?? { name: r.org || "Unknown", count: 0, pass: 0 };
+      rc.count += r.count; if (pass) rc.pass += r.count; byReceiver[r.org] = rc;
+      if (r.sel) {
+        const sd = selectors[r.sel] ?? { name: r.sel, count: 0, pass: 0, lastSeen: 0 };
+        sd.count += r.count; if (r.dkimRaw) sd.pass += r.count;
+        if (r.end > sd.lastSeen) sd.lastSeen = r.end;
+        selectors[r.sel] = sd;
+      }
+      if (!(r.sourceIp in firstSeen) || r.begin < firstSeen[r.sourceIp]) firstSeen[r.sourceIp] = r.begin;
+    }
+    const weekAgg = (start: number, end: number) => {
+      let vol = 0, pass = 0;
+      for (const d of Object.values(byDay)) {
+        const t = new Date(d.day).getTime();
+        if (t >= start && t < end) { vol += d.pass + d.fail; pass += d.pass; }
+      }
+      return { vol, pass, rate: vol ? Math.round((pass / vol) * 100) : null };
+    };
+    const wkEnd = maxD === -Infinity ? Date.now() : maxD;
+    const thisWeek = weekAgg(wkEnd - 7 * 86400000, wkEnd + 1);
+    const prevWeek = weekAgg(wkEnd - 14 * 86400000, wkEnd - 7 * 86400000);
+    const threatWeek = (start: number, end: number) => Object.entries(threatByDay).reduce((s, [day, v]) => { const t = new Date(day).getTime(); return t >= start && t < end ? s + v : s; }, 0);
+    const newWindow = wkEnd - 7 * 86400000;
+    const hasHistoryBefore = Object.values(firstSeen).some((t) => t < newWindow);
+    const newIps = hasHistoryBefore ? Object.keys(firstSeen).filter((ip) => firstSeen[ip] >= newWindow) : [];
+    const staleCutoff = wkEnd - 7 * 86400000;
+    return {
+      total, dmarcPass, failTotal, misaligned, unauth, reportCount: reportIds.size,
+      dmarcRate: total ? Math.round((dmarcPass / total) * 100) : 0,
+      failRate: total ? Math.round((failTotal / total) * 100) : 0,
+      spfRate: total ? Math.round((spfPass / total) * 100) : 0,
+      dkimRate: total ? Math.round((dkimPass / total) * 100) : 0,
+      ips: ips.size,
+      range: minD !== Infinity ? `${new Date(minD).toLocaleDateString()} – ${new Date(maxD).toLocaleDateString()}` : "—",
+      days: Object.values(byDay).sort((a, b) => a.day.localeCompare(b.day)),
+      disp,
+      reasons: Object.entries(reasons).map(([k, v]) => ({ type: k, value: v })).sort((a, b) => b.value - a.value),
+      byReceiver: Object.values(byReceiver).sort((a, b) => b.count - a.count),
+      selectors: Object.values(selectors).map((s) => ({ ...s, stale: s.lastSeen > 0 && s.lastSeen < staleCutoff })).sort((a, b) => b.count - a.count),
+      newIps: new Set(newIps),
+      trend: { thisWeek, prevWeek, thisThreat: threatWeek(wkEnd - 7 * 86400000, wkEnd + 1), prevThreat: threatWeek(wkEnd - 14 * 86400000, wkEnd - 7 * 86400000), newCount: newIps.length, hasPrev: prevWeek.vol > 0 },
+    };
+  }, [view]);
+
+  // ---------- explorer ----------
+  type IpAgg = { ip: string; cc: string; owner: string; volume: number; spfRaw: number; dkimRaw: number; spfAlign: number; dkimAlign: number; disp: Record<string, number>; spfDoms: Record<string, number>; dkimDoms: Record<string, number>; sels: Record<string, number>; reps: Record<string, number> };
+  const explorer = useMemo(() => {
+    const counts: Record<TabKey, number> = { compliant: 0, noncompliant: 0, threat: 0, forwarded: 0 };
+    const cats: Record<TabKey, Record<string, { name: string; volume: number; spf: number; dkim: number; sources: Record<string, { name: string; volume: number; spf: number; dkim: number; ips: Record<string, IpAgg> }> }>> = { compliant: {}, noncompliant: {}, threat: {}, forwarded: {} };
+    for (const r of view) {
+      const cat = classifyRow(r);
+      counts[cat] += r.count;
+      const domName = domainOf(r);
+      const dom = (cats[cat][domName] = cats[cat][domName] ?? { name: domName, volume: 0, spf: 0, dkim: 0, sources: {} });
+      const info = ipInfo[r.sourceIp];
+      const sName = info ? info.service || info.org || "Unidentified" : "Unidentified";
+      const src = (dom.sources[sName] = dom.sources[sName] ?? { name: sName, volume: 0, spf: 0, dkim: 0, ips: {} });
+      const ip = (src.ips[r.sourceIp] = src.ips[r.sourceIp] ?? { ip: r.sourceIp, cc: info?.cc ?? "", owner: info?.org ?? "", volume: 0, spfRaw: 0, dkimRaw: 0, spfAlign: 0, dkimAlign: 0, disp: {}, spfDoms: {}, dkimDoms: {}, sels: {}, reps: {} });
+      dom.volume += r.count; src.volume += r.count;
+      if (r.spfRaw) { dom.spf += r.count; src.spf += r.count; ip.spfRaw += r.count; }
+      if (r.dkimRaw) { dom.dkim += r.count; src.dkim += r.count; ip.dkimRaw += r.count; }
+      ip.volume += r.count;
+      if (r.peSpf === "pass") ip.spfAlign += r.count;
+      if (r.peDkim === "pass") ip.dkimAlign += r.count;
+      ip.disp[r.disposition] = (ip.disp[r.disposition] ?? 0) + r.count;
+      if (r.spfDom) ip.spfDoms[r.spfDom] = (ip.spfDoms[r.spfDom] ?? 0) + r.count;
+      if (r.dkimDom) ip.dkimDoms[r.dkimDom] = (ip.dkimDoms[r.dkimDom] ?? 0) + r.count;
+      if (r.sel) ip.sels[r.sel] = (ip.sels[r.sel] ?? 0) + r.count;
+      if (r.org) ip.reps[r.org] = (ip.reps[r.org] ?? 0) + r.count;
+    }
+    const build = (domsObj: (typeof cats)["compliant"]) =>
+      Object.values(domsObj).map((d) => ({
+        ...d,
+        sources: Object.values(d.sources).map((s) => ({
+          ...s,
+          ips: Object.values(s.ips).map((ip) => ({ ...ip, topDisp: top(ip.disp), spfDom: top(ip.spfDoms), dkimDom: top(ip.dkimDoms), sel: top(ip.sels), reporter: top(ip.reps) })).sort((a, b) => b.volume - a.volume),
+        })).sort((a, b) => b.volume - a.volume),
+      })).sort((a, b) => b.volume - a.volume);
+    return { counts, domains: { compliant: build(cats.compliant), noncompliant: build(cats.noncompliant), threat: build(cats.threat), forwarded: build(cats.forwarded) } };
+  }, [view, ipInfo]);
+
+  const geo = useMemo(() => {
+    const fail: Record<string, { cc: string; name: string; value: number }> = {};
+    for (const r of view) {
+      if (r.peDkim === "pass" || r.peSpf === "pass") continue;
+      const cc = ipInfo[r.sourceIp]?.cc ?? "??";
+      const name = ipInfo[r.sourceIp]?.country ?? "Unknown";
+      fail[cc] = fail[cc] ?? { cc, name, value: 0 };
+      fail[cc].value += r.count;
+    }
+    return Object.values(fail).sort((a, b) => b.value - a.value);
+  }, [view, ipInfo]);
+
+  const allIps = useMemo(() => [...new Set(view.map((r) => r.sourceIp))], [view]);
+  const unidentified = useMemo(() => allIps.filter((ip) => !ipInfo[ip]).length, [allIps, ipInfo]);
+
+  const enrich = useCallback(async () => {
+    const todo = allIps.filter((ip) => !ipInfo[ip]);
+    if (!todo.length) return;
+    setEnriching(true); setEnrichPct(0);
+    const chunks: string[][] = [];
+    for (let i = 0; i < todo.length; i += 50) chunks.push(todo.slice(i, i + 50));
+    let done = 0;
+    for (const chunk of chunks) {
+      try {
+        await fetch("/api/enrich", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ips: chunk }) });
+      } catch (e) { console.error(e); }
+      done++; setEnrichPct(Math.round((done / chunks.length) * 100));
+    }
+    await refreshData();
+    setEnriching(false);
+  }, [allIps, ipInfo, refreshData]);
+
+  // ---------- exports ----------
+  const policies = useMemo(() =>
+    reports.reduce<Record<string, { domain: string; p: string; sp: string; pct: string }>>((acc, r) => {
+      if (r.domain) acc[r.domain] = { domain: r.domain, p: r.policyP ?? "", sp: r.policySp ?? "", pct: r.policyPct ?? "" };
+      return acc;
+    }, {}), [reports]);
+  const policyList = Object.values(policies).filter((p) => domain === "all" || p.domain === domain);
+
+  const exportCsv = () => {
+    const lines = [["source_ip", "domain", "category", "service", "network_owner", "country", "volume", "spf_raw_pass", "dkim_raw_pass", "spf_aligned", "dkim_aligned", "top_disposition"].join(",")];
+    const agg: Record<string, { ip: string; domain: string; volume: number; spfRaw: number; dkimRaw: number; spfAlign: number; dkimAlign: number; disp: Record<string, number>; cats: Record<string, number> }> = {};
+    for (const r of view) {
+      const k = `${r.sourceIp}|${domainOf(r)}`;
+      const a = (agg[k] = agg[k] ?? { ip: r.sourceIp, domain: domainOf(r), volume: 0, spfRaw: 0, dkimRaw: 0, spfAlign: 0, dkimAlign: 0, disp: {}, cats: {} });
+      a.volume += r.count;
+      if (r.spfRaw) a.spfRaw += r.count;
+      if (r.dkimRaw) a.dkimRaw += r.count;
+      if (r.peSpf === "pass") a.spfAlign += r.count;
+      if (r.peDkim === "pass") a.dkimAlign += r.count;
+      a.disp[r.disposition] = (a.disp[r.disposition] ?? 0) + r.count;
+      a.cats[classifyRow(r)] = (a.cats[classifyRow(r)] ?? 0) + r.count;
+    }
+    const esc = (s: string) => `"${s.replace(/"/g, '""')}"`;
+    Object.values(agg).sort((a, b) => b.volume - a.volume).forEach((a) => {
+      const info = ipInfo[a.ip];
+      lines.push([a.ip, a.domain, top(a.cats), esc(info?.service ?? ""), esc(info?.org ?? ""), esc(info?.country ?? ""), a.volume, a.spfRaw, a.dkimRaw, a.spfAlign, a.dkimAlign, top(a.disp)].join(","));
+    });
+    downloadBlob(lines.join("\n"), `dmarc-sources-${domain}-${new Date().toISOString().slice(0, 10)}.csv`, "text/csv");
+  };
+
+  const exportBackup = () => {
+    downloadBlob(JSON.stringify({ reportIds: reports.map((r) => r.id), rows, policies, ipInfo }), `dmarc-dataset-${new Date().toISOString().slice(0, 10)}.json`, "application/json");
+  };
+
+  const exportSummary = () => {
+    const today = new Date().toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" });
+    const lines = [`# Email Authentication Portfolio Summary`, ``, `Prepared ${today}. Data range: ${m.range}.`, ``, `## Portfolio status`, ``];
+    for (const d of PORTFOLIO) {
+      const rec = PUBLISHED_RECORDS[d];
+      const p = rec?.dmarc ? tagOf(rec.dmarc, "p") || "none" : rec?.dmarc === "" ? "no record" : "unknown";
+      const bimi = rec?.bimi ? "record published (no certificate)" : rec?.bimi === "" ? "no record" : "unknown";
+      const vol = domainVolumes[d];
+      lines.push(`- **${d}** — DMARC: ${p}${p === "reject" ? " (fully enforced)" : ""}; BIMI: ${bimi}${vol ? `; ${vol.toLocaleString()} messages in dataset` : "; no report data yet"}`);
+    }
+    lines.push(``, `## Headline metrics${domain !== "all" ? ` — ${domain}` : ""}`, ``);
+    lines.push(`- Messages analysed: ${m.total.toLocaleString()} across ${m.reportCount} reports`);
+    lines.push(`- DMARC pass rate: ${m.dmarcRate}%`);
+    lines.push(`- Failing: ${m.failTotal.toLocaleString()} messages (${m.failRate}%) — ${m.misaligned.toLocaleString()} authenticated but misaligned (deliverability risk), ${m.unauth.toLocaleString()} unauthenticated (blocked threats)`);
+    lines.push(`- Unique sending sources: ${m.ips.toLocaleString()}${m.trend.newCount ? `; ${m.trend.newCount} first seen in the last 7 days` : ""}`);
+    if (m.trend.hasPrev) lines.push(`- Week over week: volume ${m.trend.thisWeek.vol.toLocaleString()} (prior ${m.trend.prevWeek.vol.toLocaleString()}), pass rate ${m.trend.thisWeek.rate}% (prior ${m.trend.prevWeek.rate}%), threat volume ${m.trend.thisThreat.toLocaleString()} (prior ${m.trend.prevThreat.toLocaleString()})`);
+    lines.push(``, `## Outstanding DNS actions`, ``);
+    DNS_ACTIONS.forEach((g) => g.records.forEach((r) => lines.push(`- [ ] ${g.domain}: publish \`${r.host}\` TXT \`${r.value}\``)));
+    lines.push(``, `---`, `Generated from the Sphere email authentication dashboard.`);
+    setSummaryText(lines.join("\n"));
+    setCopied(false);
+  };
+
+  const copySummary = async () => {
+    if (!summaryText) return;
+    try { await navigator.clipboard.writeText(summaryText); setCopied(true); } catch { /* clipboard unavailable */ }
+  };
+
+  const dispData = [
+    { name: "None", value: m.disp.none ?? 0, fill: C.none },
+    { name: "Quarantine", value: m.disp.quarantine ?? 0, fill: C.quarantine },
+    { name: "Reject", value: m.disp.reject ?? 0, fill: "#b91c1c" },
+  ].filter((d) => d.value > 0);
+
+  const hasData = view.length > 0;
+  const domains = explorer.domains[tab];
+  const fmt = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${n}`);
+  const pill = (active: boolean) => `rounded-lg border px-3 py-1.5 text-sm transition ${active ? "border-indigo-600 bg-indigo-600 text-white" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100"}`;
+  const recordAge = (rec: PublishedRecord | undefined) => (rec?.recorded ? Math.floor((Date.now() - new Date(rec.recorded).getTime()) / 86400000) : null);
+
+  return (
+    <div className="min-h-screen bg-slate-50 p-4 text-slate-800 sm:p-6">
+      <div className="mx-auto max-w-6xl space-y-6">
+        {/* header */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-600 text-white"><Shield size={22} /></div>
+            <div>
+              <h1 className="text-xl font-semibold text-slate-900">Email Authentication Dashboard</h1>
+              <p className="text-sm text-slate-500">DMARC, SPF &amp; BIMI — Sphere{hasData ? ` · ${m.range}` : ""}</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button onClick={() => void refreshData()} disabled={refreshing} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-60"><RefreshCw size={14} className={refreshing ? "animate-spin" : ""} /> Refresh</button>
+            {rows.length > 0 && (<>
+              <button onClick={exportSummary} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100"><ClipboardList size={14} /> Summary</button>
+              <button onClick={exportCsv} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100"><FileDown size={14} /> CSV</button>
+              <button onClick={exportBackup} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100"><Download size={14} /> Backup</button>
+            </>)}
+            <button onClick={() => void signOut()} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100"><LogOut size={14} /> Sign out</button>
+          </div>
+        </div>
+
+        {/* domain switcher */}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Domain</span>
+          <button onClick={() => setDomain("all")} className={pill(domain === "all")}>All domains</button>
+          {domainList.map((d) => (
+            <button key={d} onClick={() => setDomain(d)} className={pill(domain === d)}>
+              {d}
+              {domainVolumes[d]
+                ? <span className={`ml-1.5 rounded px-1.5 py-0.5 text-[10px] font-semibold ${domain === d ? "bg-white/20" : "bg-slate-100 text-slate-500"}`}>{fmt(domainVolumes[d])}</span>
+                : <span className={`ml-1.5 text-[10px] ${domain === d ? "text-white/70" : "text-slate-300"}`}>no data</span>}
+            </button>
+          ))}
+        </div>
+
+        {/* upload */}
+        <div onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)} onDrop={onDrop} onClick={() => fileRef.current?.click()}
+          className={`cursor-pointer rounded-xl border-2 border-dashed p-6 text-center transition ${drag ? "border-indigo-400 bg-indigo-50" : "border-slate-300 bg-white hover:border-indigo-300"}`}>
+          <input ref={fileRef} type="file" multiple accept=".xml,.gz,.zip,.json" className="hidden" onChange={(e) => e.target.files?.length && void handleFiles([...e.target.files])} />
+          <Upload className="mx-auto mb-2 text-slate-400" size={28} />
+          <p className="text-sm font-medium text-slate-700">Drop DMARC aggregate reports here, or click to browse</p>
+          <p className="mt-1 text-xs text-slate-400">.xml, .xml.gz, .zip — or a .json backup from the Claude artifact. Duplicates ignored by report ID.</p>
+          {busy && <p className="mt-2 text-xs font-medium text-indigo-600">Processing…</p>}
+          {msg && !busy && <p className="mt-2 text-xs font-medium text-slate-600">{msg}</p>}
+        </div>
+
+        {/* summary panel */}
+        {summaryText && (
+          <div className="rounded-xl border border-indigo-200 bg-white shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-indigo-100 px-4 py-3">
+              <span className="flex items-center gap-2 text-sm font-semibold text-slate-700"><ClipboardList size={16} /> Portfolio summary</span>
+              <div className="flex gap-2">
+                <button onClick={() => void copySummary()} className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium ${copied ? "bg-green-100 text-green-700" : "bg-indigo-600 text-white hover:bg-indigo-700"}`}>
+                  {copied ? <><CheckCircle2 size={13} /> Copied</> : "Copy markdown"}
+                </button>
+                <button onClick={() => setSummaryText(null)} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100">Close</button>
+              </div>
+            </div>
+            <pre className="max-h-96 overflow-auto whitespace-pre-wrap px-4 py-3 text-xs leading-relaxed text-slate-600">{summaryText}</pre>
+          </div>
+        )}
+
+        {/* DNS actions */}
+        <div className="rounded-xl border border-amber-200 bg-amber-50 shadow-sm">
+          <button onClick={() => setShowDns((s) => !s)} className="flex w-full items-center justify-between px-4 py-3 text-left">
+            <span className="flex items-center gap-2 text-sm font-semibold text-amber-800"><Wrench size={16} /> Outstanding DNS actions ({DNS_ACTIONS.reduce((s, g) => s + g.records.length, 0)})</span>
+            {showDns ? <ChevronDown size={16} className="text-amber-600" /> : <ChevronRight size={16} className="text-amber-600" />}
+          </button>
+          {showDns && (
+            <div className="space-y-4 border-t border-amber-200 px-4 py-3">
+              <p className="rounded-lg border border-green-200 bg-green-50 p-2.5 text-xs text-green-700">✓ Done: all four _report._dmarc authorisation records published on spheredrones.com.au — cross-domain report delivery is authorised portfolio-wide.</p>
+              {DNS_ACTIONS.map((g) => (
+                <div key={g.domain}>
+                  <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-amber-700">Add to {g.domain} DNS</p>
+                  <div className="space-y-2">
+                    {g.records.map((r, i) => (
+                      <div key={i} className="rounded-lg border border-amber-200 bg-white p-2.5">
+                        <code className="block break-all text-xs text-slate-700">{r.host} · {r.type} · &quot;{r.value}&quot;</code>
+                        <p className="mt-1 text-xs text-slate-500">{r.why}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* published records */}
+        <Panel title={domain === "all" ? "Published records" : `Published records — ${domain}`} icon={FileText}
+          right={domain !== "all" ? (
+            <div className="flex gap-2">
+              <a href={mxUrl("dmarc", domain)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-100">DMARC lookup <ExternalLink size={12} /></a>
+              <a href={mxUrl("bimi", domain)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-100">BIMI lookup <ExternalLink size={12} /></a>
+            </div>
+          ) : undefined}>
+          {domain === "all" ? (
+            <div className="space-y-2">
+              {PORTFOLIO.map((d) => {
+                const rec = PUBLISHED_RECORDS[d];
+                const age = recordAge(rec);
+                return (
+                  <div key={d} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-sm">
+                    <button onClick={() => setDomain(d)} className="font-medium text-slate-700 hover:text-indigo-700">{d}</button>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      {age != null && age > 30 && <span className="rounded bg-orange-100 px-1.5 py-0.5 text-[10px] font-semibold text-orange-700">verify — {age}d old</span>}
+                      <span className="inline-flex items-center gap-1">
+                        <StatusChip label="DMARC" value={rec?.dmarc} />
+                        <a href={mxUrl("dmarc", d)} target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-indigo-600" title="DMARC lookup"><ExternalLink size={11} /></a>
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <StatusChip label="BIMI" value={rec?.bimi} />
+                        <a href={mxUrl("bimi", d)} target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-indigo-600" title="BIMI lookup"><ExternalLink size={11} /></a>
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : PUBLISHED_RECORDS[domain] ? (
+            <div className="space-y-3">
+              {(() => {
+                const rec = PUBLISHED_RECORDS[domain];
+                const age = recordAge(rec);
+                return (<>
+                  <div>
+                    <div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-500">
+                      <span>DMARC · _dmarc</span>
+                      {rec.dmarc
+                        ? (() => { const p = tagOf(rec.dmarc, "p") || "none"; const pct = tagOf(rec.dmarc, "pct") || "100"; return <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${p === "reject" ? "bg-green-100 text-green-700" : p === "quarantine" ? "bg-amber-100 text-amber-700" : "bg-red-100 text-red-700"}`}>p={p} · {pct}%</span>; })()
+                        : rec.dmarc === "" ? <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700">no record</span>
+                        : <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">not recorded</span>}
+                    </div>
+                    {rec.dmarc
+                      ? <code className="block break-all rounded bg-slate-50 p-2 text-xs text-slate-600">{rec.dmarc}</code>
+                      : <p className="text-xs text-slate-400">{rec.dmarc === "" ? "No DMARC record published." : "Not recorded here yet."}</p>}
+                  </div>
+                  <div>
+                    <div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-500">
+                      <span>BIMI · default._bimi</span>
+                      {rec.bimi
+                        ? (() => { const hasCert = /a=\s*[^;\s]/.test(rec.bimi); return <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${hasCert ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>{hasCert ? "certificate present" : "self-asserted · no certificate"}</span>; })()
+                        : rec.bimi === "" ? <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">no BIMI record</span>
+                        : <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">not recorded</span>}
+                    </div>
+                    {rec.bimi
+                      ? <code className="block break-all rounded bg-slate-50 p-2 text-xs text-slate-600">{rec.bimi}</code>
+                      : <p className="text-xs text-slate-400">{rec.bimi === "" ? "No BIMI record published — no brand logo will appear in supporting inboxes for this domain." : "Not recorded here yet."}</p>}
+                  </div>
+                  <p className="text-xs text-slate-400">
+                    Recorded {new Date(rec.recorded).toLocaleDateString()}.
+                    {age != null && age > 30 && <span className="ml-1 font-medium text-orange-600">Over 30 days old — worth re-verifying via the lookups above.</span>}
+                  </p>
+                </>);
+              })()}
+            </div>
+          ) : (
+            <p className="text-sm text-slate-500">No records recorded for {domain} yet.</p>
+          )}
+        </Panel>
+
+        {hasData ? (
+          <>
+            {/* trend strip */}
+            <div className="grid grid-cols-1 gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:grid-cols-2 lg:grid-cols-4">
+              <div>
+                <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Volume (7d)</div>
+                <div className="mt-0.5 text-lg font-semibold text-slate-900">{m.trend.thisWeek.vol.toLocaleString()}</div>
+                <Delta now={m.trend.thisWeek.vol} prev={m.trend.hasPrev ? m.trend.prevWeek.vol : null} />
+              </div>
+              <div>
+                <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Pass rate (7d)</div>
+                <div className="mt-0.5 text-lg font-semibold text-slate-900">{m.trend.thisWeek.rate != null ? `${m.trend.thisWeek.rate}%` : "—"}</div>
+                <Delta now={m.trend.thisWeek.rate ?? 0} prev={m.trend.hasPrev ? m.trend.prevWeek.rate : null} suffix="pp" />
+              </div>
+              <div>
+                <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Threat volume (7d)</div>
+                <div className="mt-0.5 text-lg font-semibold text-slate-900">{m.trend.thisThreat.toLocaleString()}</div>
+                <Delta now={m.trend.thisThreat} prev={m.trend.hasPrev ? m.trend.prevThreat : null} invert />
+              </div>
+              <div>
+                <div className="text-xs font-medium uppercase tracking-wide text-slate-500">New sources (7d)</div>
+                <div className="mt-0.5 text-lg font-semibold text-slate-900">{m.trend.newCount}</div>
+                <span className="text-xs text-slate-400">{m.trend.newCount ? "flagged in explorer below" : "none first-seen this week"}</span>
+              </div>
+            </div>
+
+            {/* summary cards */}
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              <Card label="Messages" value={m.total.toLocaleString()} sub={`${m.reportCount} report${m.reportCount !== 1 ? "s" : ""}`} />
+              <Card label="DMARC pass" value={`${m.dmarcRate}%`} tone={m.dmarcRate >= 95 ? "green" : m.dmarcRate >= 80 ? "amber" : "red"} sub={`${m.dmarcPass.toLocaleString()} aligned`} />
+              <Card label="Failing" value={`${m.failRate}%`} tone={m.failRate === 0 ? "green" : m.failRate < 5 ? "amber" : "red"} sub={`${m.failTotal.toLocaleString()} messages`} />
+              <Card label="SPF aligned" value={`${m.spfRate}%`} tone={m.spfRate >= 90 ? "green" : "amber"} />
+              <Card label="DKIM aligned" value={`${m.dkimRate}%`} tone={m.dkimRate >= 90 ? "green" : "amber"} />
+              <Card label="Sources" value={m.ips.toLocaleString()} sub="unique IPs" tone="indigo" />
+            </div>
+
+            {/* failure triage */}
+            <Panel title="Failure triage & enforcement impact" icon={AlertTriangle}>
+              {m.failTotal === 0 ? (
+                <p className="text-sm text-green-700">Every message passed DMARC. Nothing is being blocked by your policy.</p>
+              ) : (
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <div className="space-y-2.5">
+                    <StatBar label="Authenticated but misaligned" hint="possibly legit — investigate" value={m.misaligned} total={m.failTotal} color={C.misaligned} />
+                    <StatBar label="Not authenticated" hint="correctly blocked" value={m.unauth} total={m.failTotal} color={C.unauth} />
+                  </div>
+                  <div className="rounded-lg bg-slate-50 p-3 text-xs leading-relaxed text-slate-600">
+                    <span className="font-medium text-slate-700">{m.failRate}% of mail ({m.failTotal.toLocaleString()}) is failing DMARC.</span>{" "}
+                    {m.misaligned > 0
+                      ? <>The <span className="font-medium text-amber-700">{m.misaligned.toLocaleString()} authenticated-but-misaligned</span> messages are often legitimate senders needing alignment — see the fix hints per source in the Non-compliant tab below.</>
+                      : "None of the failing mail authenticated on any domain — consistent with spoofing or fully broken senders."}
+                  </div>
+                </div>
+              )}
+            </Panel>
+
+            {/* charts */}
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm lg:col-span-2">
+                <h2 className="mb-3 text-sm font-semibold text-slate-700">Compliance over time</h2>
+                <ResponsiveContainer width="100%" height={260}>
+                  <BarChart data={m.days}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                    <XAxis dataKey="day" tick={{ fontSize: 11 }} stroke="#94a3b8" /><YAxis tick={{ fontSize: 11 }} stroke="#94a3b8" />
+                    <Tooltip /><Legend wrapperStyle={{ fontSize: 12 }} />
+                    <Bar dataKey="pass" stackId="a" name="DMARC pass" fill={C.pass} /><Bar dataKey="fail" stackId="a" name="DMARC fail" fill={C.fail} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                <h2 className="mb-3 text-sm font-semibold text-slate-700">Disposition</h2>
+                {dispData.length ? (
+                  <ResponsiveContainer width="100%" height={260}>
+                    <PieChart><Pie data={dispData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={90} label={(e) => e.name}>{dispData.map((e, i) => <Cell key={i} fill={e.fill} />)}</Pie><Tooltip /></PieChart>
+                  </ResponsiveContainer>
+                ) : <p className="py-10 text-center text-sm text-slate-400">No data</p>}
+              </div>
+            </div>
+
+            {/* breakdown panels */}
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+              <Panel title="Policy override reasons">
+                {m.reasons.length ? (
+                  <div className="space-y-2.5">
+                    {m.reasons.map((r) => <StatBar key={r.type} label={REASON_LABELS[r.type] ?? r.type} value={r.value} total={m.total} color={C.none} />)}
+                    <p className="pt-1 text-xs text-slate-400">Forwarding and mailing-list traffic legitimately breaks SPF/DKIM — failures tagged here usually aren&apos;t spoofing.</p>
+                  </div>
+                ) : <p className="text-sm text-slate-400">No policy overrides reported.</p>}
+              </Panel>
+              <Panel title="By receiver">
+                <div className="space-y-2.5">{m.byReceiver.slice(0, 6).map((r) => <StatBar key={r.name} label={r.name} hint={`${Math.round((r.pass / r.count) * 100)}% pass`} value={r.count} total={m.total} color="#6366f1" />)}</div>
+              </Panel>
+              <Panel title="DKIM signing selectors">
+                {m.selectors.length ? (
+                  <div className="space-y-2.5">
+                    {m.selectors.slice(0, 6).map((s) => <StatBar key={s.name} label={`${s.name}${s.stale ? " ⚠ not seen in 7d" : ""}`} hint={`${Math.round((s.pass / s.count) * 100)}% pass`} value={s.count} total={m.total} color={s.stale ? "#f59e0b" : "#8b5cf6"} />)}
+                    {m.selectors.some((s) => s.stale) && <p className="pt-1 text-xs text-amber-600">⚠ A selector that stops appearing can indicate a broken key rotation.</p>}
+                  </div>
+                ) : <p className="text-sm text-slate-400">No DKIM selectors seen in reports.</p>}
+              </Panel>
+            </div>
+
+            {geo.length > 0 && geo.some((g) => g.cc !== "??") && (
+              <Panel title="Failing mail by country">
+                <div className="grid grid-cols-1 gap-x-6 gap-y-2.5 sm:grid-cols-2">
+                  {geo.slice(0, 8).map((g) => <StatBar key={g.cc} label={<span className="inline-flex items-center gap-1.5"><Flag cc={g.cc} />{g.name}</span>} value={g.value} total={m.failTotal || 1} color={C.fail} />)}
+                </div>
+              </Panel>
+            )}
+
+            {policyList.length > 0 && (
+              <Panel title="Published policy & BIMI readiness (from reports)">
+                <div className="space-y-3">
+                  {policyList.map((p) => {
+                    const enforced = p.p === "quarantine" || p.p === "reject";
+                    const full = p.p === "reject" && (!p.pct || p.pct === "100");
+                    return (
+                      <div key={p.domain} className="rounded-lg border border-slate-100 bg-slate-50 p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-medium text-slate-800">{p.domain}</span>
+                          <div className="flex flex-wrap gap-1.5 text-xs">
+                            <span className="rounded border border-slate-200 bg-white px-2 py-0.5">p={p.p || "—"}</span>
+                            {p.sp && <span className="rounded border border-slate-200 bg-white px-2 py-0.5">sp={p.sp}</span>}
+                            <span className="rounded border border-slate-200 bg-white px-2 py-0.5">pct={p.pct || "100"}</span>
+                          </div>
+                        </div>
+                        <div className="mt-2 flex items-center gap-2 text-xs">
+                          {full ? <CheckCircle2 size={14} className="text-green-600" /> : enforced ? <AlertTriangle size={14} className="text-amber-600" /> : <XCircle size={14} className="text-red-600" />}
+                          <span className={full ? "text-green-700" : enforced ? "text-amber-700" : "text-red-700"}>
+                            {full ? "BIMI eligible — enforced at p=reject, 100%" : enforced ? "Partial — BIMI generally wants p=reject (or quarantine 100%)" : "Not BIMI eligible — policy must be quarantine or reject"}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </Panel>
+            )}
+
+            {/* source explorer */}
+            <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
+              <div className="flex flex-wrap items-center gap-1 border-b border-slate-200 px-3 pt-2">
+                {TABS.map((t) => (
+                  <button key={t.key} onClick={() => setTab(t.key)}
+                    className={`flex items-center gap-2 rounded-t-lg px-3 py-2 text-sm font-medium transition ${tab === t.key ? "border-b-2 border-indigo-600 text-indigo-700" : "text-slate-500 hover:text-slate-700"}`}>
+                    {t.label}<span className={`rounded px-1.5 py-0.5 text-xs font-semibold ${t.badge}`}>{explorer.counts[t.key].toLocaleString()}</span>
+                  </button>
+                ))}
+                <div className="ml-auto py-1">
+                  {unidentified > 0 ? (
+                    <button onClick={() => void enrich()} disabled={enriching} className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-60">
+                      {enriching ? <><RefreshCw size={13} className="animate-spin" /> Identifying… {enrichPct}%</> : <><Globe size={13} /> Identify {unidentified} source{unidentified !== 1 ? "s" : ""}</>}
+                    </button>
+                  ) : <span className="inline-flex items-center gap-1 pr-2 text-xs text-green-600"><CheckCircle2 size={12} /> Sources identified</span>}
+                </div>
+              </div>
+
+              <div className="overflow-x-auto p-3">
+                {domains.length === 0 ? (
+                  <p className="py-8 text-center text-sm text-slate-400">No messages in this category.</p>
+                ) : (
+                  <table className="w-full min-w-[820px] border-collapse text-sm">
+                    <thead>
+                      <tr className="bg-slate-100 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        <th className="rounded-tl-lg px-3 py-2">Sending domain / source</th>
+                        <th className="px-3 py-2 text-right">Volume</th>
+                        <th className="px-3 py-2">SPF pass</th>
+                        <th className="rounded-tr-lg px-3 py-2">DKIM pass</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {domains.map((dom) => {
+                        const dKey = `${tab}|${dom.name}`;
+                        const collapsed = closedDoms[dKey] !== false; // default collapsed
+                        return (
+                          <React.Fragment key={dom.name}>
+                            <tr onClick={() => setClosedDoms((o) => ({ ...o, [dKey]: !(o[dKey] !== false) }))}
+                              className="cursor-pointer border-b border-slate-200 bg-slate-50 hover:bg-slate-100">
+                              <td className="px-3 py-2 font-semibold text-slate-800">
+                                <span className="flex items-center gap-1.5">
+                                  {collapsed ? <ChevronRight size={15} className="text-slate-500" /> : <ChevronDown size={15} className="text-slate-500" />}
+                                  {dom.name}
+                                  <span className="text-xs font-normal text-slate-400">({dom.sources.length} source{dom.sources.length !== 1 ? "s" : ""})</span>
+                                </span>
+                              </td>
+                              <td className="px-3 py-2 text-right font-medium tabular-nums">{dom.volume.toLocaleString()}</td>
+                              <td className="px-3 py-2"><PctBar pct={Math.round((dom.spf / dom.volume) * 100)} /></td>
+                              <td className="px-3 py-2"><PctBar pct={Math.round((dom.dkim / dom.volume) * 100)} /></td>
+                            </tr>
+                            {!collapsed && dom.sources.map((src) => {
+                              const key = `${tab}|${dom.name}|${src.name}`;
+                              const open = openSrc[key];
+                              const hint = tab === "noncompliant" && src.ips.length ? fixHint(src.ips[0]) : null;
+                              return (
+                                <React.Fragment key={src.name}>
+                                  <tr onClick={() => setOpenSrc((o) => ({ ...o, [key]: !o[key] }))}
+                                    className="cursor-pointer border-b border-slate-100 hover:bg-slate-50">
+                                    <td className="px-3 py-2">
+                                      <span className="flex items-center gap-1.5 pl-6 text-slate-700">
+                                        {open ? <ChevronDown size={14} className="text-slate-400" /> : <ChevronRight size={14} className="text-slate-400" />}
+                                        {src.name}<span className="text-xs text-slate-400">({src.ips.length} IP{src.ips.length !== 1 ? "s" : ""})</span>
+                                      </span>
+                                      {hint && !open && <div className="flex items-start gap-1.5 pl-11 pt-1 text-xs text-amber-700"><Wrench size={12} className="mt-0.5 shrink-0" />{hint}</div>}
+                                    </td>
+                                    <td className="px-3 py-2 text-right tabular-nums text-slate-600">{src.volume.toLocaleString()}</td>
+                                    <td className="px-3 py-2"><PctBar pct={Math.round((src.spf / src.volume) * 100)} /></td>
+                                    <td className="px-3 py-2"><PctBar pct={Math.round((src.dkim / src.volume) * 100)} /></td>
+                                  </tr>
+                                  {open && (
+                                    <tr className="border-b border-slate-100">
+                                      <td colSpan={4} className="bg-slate-50/60 px-3 pb-3">
+                                        <div className="overflow-x-auto">
+                                          {hint && <div className="flex items-start gap-1.5 px-1 py-2 text-xs text-amber-700"><Wrench size={12} className="mt-0.5 shrink-0" />{hint}</div>}
+                                          <table className="w-full text-left text-xs">
+                                            <thead>
+                                              <tr className="text-[11px] uppercase tracking-wide text-slate-400">
+                                                <th className="py-2 pr-3">Source IP</th><th className="py-2 pr-3 text-right">Vol</th><th className="py-2 pr-3">Delivery</th>
+                                                <th className="py-2 pr-3">DMARC</th><th className="py-2 pr-3">SPF</th><th className="py-2 pr-3">SPF align</th><th className="py-2 pr-3">SPF auth</th>
+                                                <th className="py-2 pr-3">DKIM</th><th className="py-2 pr-3">DKIM align</th><th className="py-2 pr-3">DKIM auth</th><th className="py-2 pr-3">Reporter</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody>
+                                              {src.ips.map((ip) => {
+                                                const dmarcOk = ip.dkimAlign > 0 || ip.spfAlign > 0;
+                                                const spfRes = ip.spfRaw === ip.volume ? "pass" : ip.spfRaw === 0 ? "fail" : "partial";
+                                                const dkimRes = ip.dkimRaw === ip.volume ? "pass" : ip.dkimRaw === 0 ? "fail" : "partial";
+                                                return (
+                                                  <tr key={ip.ip} className="border-t border-slate-100">
+                                                    <td className="py-2 pr-3 font-mono">
+                                                      <div className="flex items-center gap-1.5"><Flag cc={ip.cc} /> {ip.ip}{m.newIps.has(ip.ip) && <span className="inline-flex items-center gap-0.5 rounded bg-amber-100 px-1 text-[10px] font-medium text-amber-700"><Sparkles size={9} />new</span>}</div>
+                                                      {ip.owner && <div className="text-[10px] text-slate-400">{ip.owner}</div>}
+                                                    </td>
+                                                    <td className="py-2 pr-3 text-right tabular-nums">{ip.volume.toLocaleString()}</td>
+                                                    <td className="py-2 pr-3"><span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${ip.topDisp === "none" ? "bg-green-100 text-green-700" : ip.topDisp === "quarantine" ? "bg-amber-100 text-amber-700" : "bg-red-100 text-red-700"}`}>{DELIVERY[ip.topDisp] ?? ip.topDisp}</span></td>
+                                                    <td className="py-2 pr-3"><Auth result={dmarcOk ? "pass" : "fail"} /></td>
+                                                    <td className="py-2 pr-3"><div className="flex items-center gap-1.5"><Auth result={spfRes} /><span className="text-[10px] tabular-nums text-slate-400">{Math.round((ip.spfRaw / ip.volume) * 100)}%</span></div></td>
+                                                    <td className="py-2 pr-3"><Auth result={ip.spfAlign > 0 ? "aligned" : "fail"} /></td>
+                                                    <td className="py-2 pr-3 text-slate-500"><span className="block max-w-[160px] truncate">{ip.spfDom || "—"}</span></td>
+                                                    <td className="py-2 pr-3"><div className="flex items-center gap-1.5"><Auth result={dkimRes} /><span className="text-[10px] tabular-nums text-slate-400">{Math.round((ip.dkimRaw / ip.volume) * 100)}%</span></div></td>
+                                                    <td className="py-2 pr-3"><Auth result={ip.dkimAlign > 0 ? "aligned" : "fail"} /></td>
+                                                    <td className="py-2 pr-3 text-slate-500"><span className="block max-w-[180px] truncate">{ip.dkimDom || "—"}{ip.sel ? ` (s=${ip.sel})` : ""}</span></td>
+                                                    <td className="py-2 pr-3 text-slate-500"><span className="block max-w-[140px] truncate">{ip.reporter || "—"}</span></td>
+                                                  </tr>
+                                                );
+                                              })}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </React.Fragment>
+                              );
+                            })}
+                          </React.Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          </>
+        ) : loaded && (
+          <div className="rounded-xl border border-slate-200 bg-white p-6 text-center text-sm text-slate-500">
+            <FileText className="mx-auto mb-2 text-slate-300" size={28} />
+            {domain === "all" ? "No reports loaded yet. Drop DMARC aggregate reports above — or your Claude artifact backup JSON — to get started." : `No reports loaded for ${domain} yet.`}
+          </div>
+        )}
+
+        <p className="pb-4 text-center text-xs text-slate-400">Shared team dataset stored in Postgres. De-duplicated by report ID. IP owner/country lookups run server-side and are cached.</p>
+      </div>
+    </div>
+  );
+}
