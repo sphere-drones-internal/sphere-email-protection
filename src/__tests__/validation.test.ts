@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { enrichSchema, uploadSchema, parsedReportSchema, backupSchema } from "@/lib/validation";
+import { enrichSchema, uploadSchema, parsedReportSchema, backupSchema, dnsCheckSchema } from "@/lib/validation";
 
 describe("enrichSchema", () => {
   it("accepts valid IPs", () => {
@@ -10,7 +10,10 @@ describe("enrichSchema", () => {
   });
   it("rejects empty and oversized lists", () => {
     expect(enrichSchema.safeParse({ ips: [] }).success).toBe(false);
-    expect(enrichSchema.safeParse({ ips: Array(101).fill("1.1.1.1") }).success).toBe(false);
+    expect(enrichSchema.safeParse({ ips: Array(1001).fill("1.1.1.1") }).success).toBe(false);
+  });
+  it("accepts a full batch of 1000", () => {
+    expect(enrichSchema.safeParse({ ips: Array(1000).fill("1.1.1.1") }).success).toBe(true);
   });
 });
 
@@ -64,5 +67,21 @@ describe("backupSchema", () => {
   });
   it("rejects an ipInfo section that isn't a map of objects", () => {
     expect(backupSchema.safeParse({ rows: [{ reportId: "r1" }], ipInfo: { "1.1.1.1": "not-an-object" } }).success).toBe(false);
+  });
+});
+
+describe("dnsCheckSchema", () => {
+  it("accepts observed selectors per domain, and an empty body", () => {
+    expect(dnsCheckSchema.safeParse({ selectors: { "spheredrones.com.au": ["google", "s2048.dkim"] } }).success).toBe(true);
+    expect(dnsCheckSchema.safeParse({}).success).toBe(true);
+  });
+  it("rejects selector names that aren't valid DNS labels", () => {
+    expect(dnsCheckSchema.safeParse({ selectors: { "d.com": ["bad selector!"] } }).success).toBe(false);
+    expect(dnsCheckSchema.safeParse({ selectors: { "d.com": ["-leadinghyphen"] } }).success).toBe(false);
+  });
+  it("rejects oversized selector lists and domain maps", () => {
+    expect(dnsCheckSchema.safeParse({ selectors: { "d.com": Array(21).fill("s1") } }).success).toBe(false);
+    const many = Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`d${i}.com`, ["s1"]]));
+    expect(dnsCheckSchema.safeParse({ selectors: many }).success).toBe(false);
   });
 });

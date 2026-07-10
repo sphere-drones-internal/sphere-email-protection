@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireUser, AuthError } from "@/lib/auth";
+import { dnsCheckSchema } from "@/lib/validation";
+import { spfTerms, SPF_COUNT_CAP } from "@/lib/spf";
 import { Resolver } from "node:dns/promises";
 
 const DOMAINS = [
@@ -38,29 +40,85 @@ function parseDmarc(records: string[]) {
   };
 }
 
+// Walks the include/redirect tree counting DNS lookups against the RFC 7208
+// limit of 10. Caps at SPF_COUNT_CAP with cycle protection — past the limit the
+// exact number stops mattering.
+async function spfLookupCount(record: string): Promise<number> {
+  const seen = new Set<string>();
+  let count = 0;
+  const walk = async (rec: string): Promise<void> => {
+    const { lookupTerms, targets } = spfTerms(rec);
+    count += lookupTerms;
+    for (const target of targets) {
+      if (count >= SPF_COUNT_CAP || seen.has(target) || seen.size >= SPF_COUNT_CAP) continue;
+      seen.add(target);
+      const sub = (await txt(target)).find((r) => r.toLowerCase().startsWith("v=spf1"));
+      if (sub) await walk(sub);
+    }
+  };
+  await walk(record);
+  return Math.min(count, SPF_COUNT_CAP);
+}
+
+// DKIM has no fixed record name — keys live at <selector>._domainkey.<domain>.
+// Probe the selectors major providers use, plus any observed in report data.
+const COMMON_DKIM_SELECTORS = ["google", "selector1", "selector2", "k1", "s1", "s2", "default", "mail"];
+
+async function dkimSelectors(domain: string, observed: string[]): Promise<{ found: string[]; checked: number }> {
+  const names = [...new Set([...COMMON_DKIM_SELECTORS, ...observed])];
+  const results = await Promise.all(
+    names.map(async (sel) => {
+      const records = await txt(`${sel}._domainkey.${domain}`);
+      return /v=dkim1|p=/i.test(records.join(" ")) ? sel : null;
+    })
+  );
+  return { found: results.filter((s): s is string => s !== null).sort(), checked: names.length };
+}
+
+async function runChecks(observedSelectors: Record<string, string[]>) {
+  return Promise.all(
+    DOMAINS.map(async (domain) => {
+      const [dmarcTxt, rootTxt, bimiTxt, dkim] = await Promise.all([
+        txt(`_dmarc.${domain}`),
+        txt(domain),
+        txt(`default._bimi.${domain}`),
+        dkimSelectors(domain, observedSelectors[domain] ?? []),
+      ]);
+      const spf = rootTxt.find((r) => r.toLowerCase().startsWith("v=spf1")) ?? null;
+      return {
+        domain,
+        dmarc: parseDmarc(dmarcTxt),
+        spf,
+        spfLookups: spf ? await spfLookupCount(spf) : null,
+        bimi: bimiTxt.find((r) => r.toLowerCase().startsWith("v=bimi1")) ?? null,
+        dkim: dkim.found,
+        dkimChecked: dkim.checked,
+        checkedAt: new Date().toISOString(),
+      };
+    })
+  );
+}
+
 export async function GET() {
   try {
     await requireUser();
-    const results = await Promise.all(
-      DOMAINS.map(async (domain) => {
-        const [dmarcTxt, rootTxt, bimiTxt] = await Promise.all([
-          txt(`_dmarc.${domain}`),
-          txt(domain),
-          txt(`default._bimi.${domain}`),
-        ]);
-        return {
-          domain,
-          dmarc: parseDmarc(dmarcTxt),
-          spf: rootTxt.find((r) => r.toLowerCase().startsWith("v=spf1")) ?? null,
-          bimi: bimiTxt.find((r) => r.toLowerCase().startsWith("v=bimi1")) ?? null,
-          checkedAt: new Date().toISOString(),
-        };
-      })
-    );
-    return NextResponse.json({ results });
+    return NextResponse.json({ results: await runChecks({}) });
   } catch (e) {
     if (e instanceof AuthError) return NextResponse.json({ error: e.message }, { status: e.status });
     console.error("dns GET failed", e);
+    return NextResponse.json({ error: "Internal error" }, { status: 500 });
+  }
+}
+
+export async function POST(req: Request) {
+  try {
+    await requireUser();
+    const parsed = dnsCheckSchema.safeParse(await req.json().catch(() => ({})));
+    if (!parsed.success) return NextResponse.json({ error: "Invalid input" }, { status: 400 });
+    return NextResponse.json({ results: await runChecks(parsed.data.selectors ?? {}) });
+  } catch (e) {
+    if (e instanceof AuthError) return NextResponse.json({ error: e.message }, { status: e.status });
+    console.error("dns POST failed", e);
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
 }

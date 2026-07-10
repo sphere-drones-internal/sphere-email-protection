@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const enrichSchema = z.object({
-  ips: z.array(z.union([z.ipv4(), z.ipv6()])).min(1).max(100),
+  ips: z.array(z.union([z.ipv4(), z.ipv6()])).min(1).max(1000),
 });
 
 const rowSchema = z.object({
@@ -38,4 +38,15 @@ export const uploadSchema = z.object({
 export const backupSchema = z.object({
   rows: z.array(z.record(z.string(), z.unknown())).min(1),
   ipInfo: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+});
+
+// Observed DKIM selectors per domain (from report data) to probe alongside the
+// common ones. Only selector names are user-controlled — the route resolves them
+// exclusively under its own fixed domain list, never under caller-supplied domains.
+const dnsLabel = /^[a-z0-9]([a-z0-9._-]{0,61}[a-z0-9])?$/i;
+export const dnsCheckSchema = z.object({
+  selectors: z
+    .record(z.string().max(253), z.array(z.string().regex(dnsLabel)).max(20))
+    .refine((o) => Object.keys(o).length <= 20, "too many domains")
+    .optional(),
 });

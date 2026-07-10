@@ -2,30 +2,40 @@ import { NextResponse } from "next/server";
 import { requireUser, AuthError } from "@/lib/auth";
 import { enrichSchema } from "@/lib/validation";
 import { db } from "@/lib/db";
-import { reverse } from "node:dns/promises";
 import { OVERRIDES } from "@/lib/ip-overrides";
 import { writeAudit } from "@/lib/audit";
+import { normalizeIpinfo, type GeoResult, type IpinfoEntry } from "@/lib/geo";
 
-async function ptr(ip: string): Promise<string> {
-  try {
-    const names = await reverse(ip);
-    return names[0] ?? "";
-  } catch {
-    return "";
+// Resolves country/org/hostname for many IPs at once via ipinfo.io's batch
+// endpoint (up to 1000 per call). IPs that fail or come back unusable are simply
+// absent from the returned map — the caller leaves them uncached and retryable.
+async function lookupBatch(ips: string[]): Promise<Map<string, GeoResult>> {
+  const out = new Map<string, GeoResult>();
+  if (!ips.length) return out;
+  const token = process.env.IPINFO_TOKEN;
+  if (!token) {
+    console.error("IPINFO_TOKEN is not set — geo enrichment is disabled until it is configured");
+    return out;
   }
-}
-
-async function geo(ip: string): Promise<{ country: string; cc: string; org: string }> {
-  try {
-    const res = await fetch(`https://ipapi.co/${ip}/json/`, {
-      headers: { "User-Agent": "sphere-dmarc-app" },
-    });
-    if (!res.ok) return { country: "", cc: "", org: "" };
-    const d = await res.json();
-    return { country: d.country_name ?? "", cc: d.country_code ?? "", org: d.org ?? "" };
-  } catch {
-    return { country: "", cc: "", org: "" };
+  for (let i = 0; i < ips.length; i += 1000) {
+    const chunk = ips.slice(i, i + 1000);
+    try {
+      const res = await fetch(`https://ipinfo.io/batch?token=${token}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(chunk),
+      });
+      if (!res.ok) continue; // 429/auth failure → leave this chunk for a later retry
+      const data = (await res.json()) as Record<string, IpinfoEntry>;
+      for (const [ip, entry] of Object.entries(data)) {
+        const g = normalizeIpinfo(entry);
+        if (g) out.set(ip, g);
+      }
+    } catch (e) {
+      console.error("ipinfo batch lookup failed", e);
+    }
   }
+  return out;
 }
 
 export async function POST(req: Request) {
@@ -38,31 +48,48 @@ export async function POST(req: Request) {
 
     const cached = await db.ipInfo.findMany({ where: { ip: { in: ips } } });
     const cachedMap = new Map(cached.map((c) => [c.ip, c]));
-    // Manual rows are authoritative; only enrich IPs that are absent entirely
-    const missing = ips.filter((ip) => !cachedMap.has(ip));
+    // Enrich IPs that are absent, plus cached non-manual rows whose geo lookup
+    // previously failed (empty cc) — those are retried until they resolve.
+    const toEnrich = ips.filter((ip) => {
+      const c = cachedMap.get(ip);
+      return !c || (!c.manual && !c.cc);
+    });
 
-    for (const ip of missing) {
+    let enriched = 0, failed = 0;
+
+    // Built-in overrides are authoritative and need no network call.
+    const lookups: string[] = [];
+    for (const ip of toEnrich) {
       const override = OVERRIDES[ip];
-      const data = override
-        ? { ip, ...override, ptr: "", manual: true }
-        : await (async () => {
-            const [ptrName, g] = await Promise.all([ptr(ip), geo(ip)]);
-            return { ip, org: g.org, country: g.country, cc: g.cc, service: "", ptr: ptrName, manual: false };
-          })();
-
-      const saved = await db.ipInfo.upsert({
-        where: { ip },
-        create: data,
-        update: data,
-      });
-      cachedMap.set(ip, saved);
+      if (override) {
+        const saved = await db.ipInfo.upsert({
+          where: { ip },
+          create: { ip, ...override, ptr: "", manual: true },
+          update: { ...override, manual: true },
+        });
+        cachedMap.set(ip, saved);
+        enriched++;
+      } else {
+        lookups.push(ip);
+      }
     }
 
-    if (missing.length) await writeAudit(user.email, "ipinfo.enrich", { requested: ips.length, enriched: missing.length });
+    const geoMap = await lookupBatch(lookups);
+    for (const ip of lookups) {
+      const g = geoMap.get(ip);
+      if (!g) { failed++; continue; } // leave uncached/unchanged so it retries next run
+      const data = { ip, org: g.org, country: g.country, cc: g.cc, service: "", ptr: g.ptr, manual: false };
+      const saved = await db.ipInfo.upsert({ where: { ip }, create: data, update: data });
+      cachedMap.set(ip, saved);
+      enriched++;
+    }
+
+    if (toEnrich.length) await writeAudit(user.email, "ipinfo.enrich", { requested: ips.length, enriched, failed });
 
     return NextResponse.json({
       results: ips.map((ip) => {
-        const e = cachedMap.get(ip)!;
+        const e = cachedMap.get(ip);
+        if (!e) return { ip, org: "", country: "", cc: "", service: "", ptr: "", manual: false };
         return { ip, org: e.org, country: e.country, cc: e.cc, service: e.service, ptr: e.ptr, manual: e.manual };
       }),
     });

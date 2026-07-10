@@ -2,7 +2,9 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import { evaluateAuth } from "@/lib/auth-core";
 
-const PUBLIC_PATHS = ["/login", "/auth/callback"];
+// Brand assets and the favicon route must load on the unauthenticated login page —
+// without these the auth redirect turns every <img> into a broken image.
+const PUBLIC_PATHS = ["/login", "/auth/callback", "/sphere-logo.svg", "/sphere-mark.svg", "/icon.svg"];
 
 export async function proxy(req: NextRequest) {
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
