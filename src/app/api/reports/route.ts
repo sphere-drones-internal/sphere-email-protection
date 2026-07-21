@@ -1,14 +1,15 @@
 import { NextResponse } from "next/server";
-import { requireUser, AuthError } from "@/lib/auth";
+import { getIdentity, IdentityError } from "@/lib/auth";
 import { uploadSchema } from "@/lib/validation";
-import { db } from "@/lib/db";
+import { db, ensureSchema } from "@/lib/db";
 import { writeAudit } from "@/lib/audit";
 
 export async function POST(req: Request) {
   try {
-    const user = await requireUser();
+    const user = await getIdentity();
     const parsed = uploadSchema.safeParse(await req.json());
     if (!parsed.success) return NextResponse.json({ error: "Invalid input" }, { status: 400 });
+    await ensureSchema();
 
     const ids = parsed.data.reports.map((r) => r.id);
     const existing = await db.report.findMany({ where: { id: { in: ids } }, select: { id: true } });
@@ -50,7 +51,7 @@ export async function POST(req: Request) {
     await writeAudit(user.email, "report.upload", { attempted: ids.length, added, skipped });
     return NextResponse.json({ added, skipped });
   } catch (e) {
-    if (e instanceof AuthError) return NextResponse.json({ error: e.message }, { status: e.status });
+    if (e instanceof IdentityError) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
     console.error("reports POST failed", e);
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }

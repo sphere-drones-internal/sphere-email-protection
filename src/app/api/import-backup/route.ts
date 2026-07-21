@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { requireUser, AuthError } from "@/lib/auth";
+import { getIdentity, IdentityError } from "@/lib/auth";
 import { backupSchema } from "@/lib/validation";
-import { db } from "@/lib/db";
+import { db, ensureSchema } from "@/lib/db";
 import { writeAudit } from "@/lib/audit";
 
 type LegacyRow = Record<string, unknown>;
@@ -35,10 +35,11 @@ function normaliseRow(r: LegacyRow) {
 
 export async function POST(req: Request) {
   try {
-    const user = await requireUser();
+    const user = await getIdentity();
 
     const parsed = backupSchema.safeParse(await req.json());
     if (!parsed.success) return NextResponse.json({ error: "Invalid input" }, { status: 400 });
+    await ensureSchema();
 
     const rows = parsed.data.rows.map(normaliseRow).filter((r) => r.reportId && r.row.sourceIp);
 
@@ -84,7 +85,7 @@ export async function POST(req: Request) {
     await writeAudit(user.email, "backup.import", { reportsAdded: added, reportsSkipped: byReport.size - added, ipInfoSeeded: ipUpserts });
     return NextResponse.json({ added, skipped: byReport.size - added });
   } catch (e) {
-    if (e instanceof AuthError) return NextResponse.json({ error: e.message }, { status: e.status });
+    if (e instanceof IdentityError) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
     console.error("import failed", e);
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }

@@ -1,32 +1,26 @@
-import { describe, it, expect } from "vitest";
-import { evaluateAuth, isAllowedEmail } from "@/lib/auth-core";
+import { describe, it, expect, vi } from "vitest";
 
-const ALLOWED = "spheregroup.com.au,spheredrones.com.au";
+// getIdentity reads the identity the platform's Authentik forward-auth injects.
+const headerMock = vi.hoisted(() => ({ current: new Headers() }));
+vi.mock("next/headers", () => ({ headers: async () => headerMock.current }));
 
-describe("evaluateAuth", () => {
-  it("returns 401 when there is no session email", () => {
-    expect(evaluateAuth(null, ALLOWED)).toEqual({ ok: false, status: 401 });
-    expect(evaluateAuth(undefined, ALLOWED)).toEqual({ ok: false, status: 401 });
-    expect(evaluateAuth("", ALLOWED)).toEqual({ ok: false, status: 401 });
+import { getIdentity, IdentityError } from "@/lib/auth";
+
+const withHeaders = (h: Record<string, string>) => { headerMock.current = new Headers(h); };
+
+describe("getIdentity", () => {
+  it("returns the forwarded identity, lowercasing the email", () => {
+    withHeaders({ "x-authentik-email": "Josh@SphereGroup.com.au", "x-authentik-username": "josh" });
+    return expect(getIdentity()).resolves.toEqual({ email: "josh@spheregroup.com.au", username: "josh" });
   });
 
-  it("returns 403 for an email outside the allowed domains", () => {
-    expect(evaluateAuth("josh@gmail.com", ALLOWED)).toEqual({ ok: false, status: 403 });
-    expect(evaluateAuth("attacker@spheregroup.com.au.evil.com", ALLOWED)).toEqual({ ok: false, status: 403 });
+  it("falls back to the email when no username header is present", async () => {
+    withHeaders({ "x-authentik-email": "ops@spheredrones.com.au" });
+    await expect(getIdentity()).resolves.toEqual({ email: "ops@spheredrones.com.au", username: "ops@spheredrones.com.au" });
   });
 
-  it("passes an allowed-domain email", () => {
-    expect(evaluateAuth("josh@spheregroup.com.au", ALLOWED)).toEqual({ ok: true });
-    expect(evaluateAuth("josh@SPHEREDRONES.COM.AU", ALLOWED)).toEqual({ ok: true });
-  });
-
-  it("denies everything when the allow-list is empty", () => {
-    expect(evaluateAuth("josh@spheregroup.com.au", "")).toEqual({ ok: false, status: 403 });
-  });
-});
-
-describe("isAllowedEmail", () => {
-  it("handles whitespace in the CSV", () => {
-    expect(isAllowedEmail("a@b.com", " b.com , c.com ")).toBe(true);
+  it("throws IdentityError (fail closed) when no identity header is present", async () => {
+    withHeaders({});
+    await expect(getIdentity()).rejects.toBeInstanceOf(IdentityError);
   });
 });

@@ -10,11 +10,11 @@
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
-import { Upload, CheckCircle2, AlertTriangle, Globe, FileText, Download, RefreshCw, Sparkles, ChevronRight, ChevronDown, ExternalLink, TrendingUp, TrendingDown, Minus, Wrench, ClipboardList, FileDown, LogOut } from "lucide-react";
+import { Upload, CheckCircle2, AlertTriangle, Globe, FileText, Download, RefreshCw, Sparkles, ChevronRight, ChevronDown, ExternalLink, TrendingUp, TrendingDown, Minus, Wrench, ClipboardList, FileDown } from "lucide-react";
+import "flag-icons/css/flag-icons.min.css";
 import { classifyRow, fixHint, MANUAL_IPINFO, type TrimmedRow, type ParsedReport } from "@/lib/dmarc";
 import { buildOverview } from "@/lib/summary";
 import { extractXml, parseReport } from "@/lib/dmarc-client";
-import { supabaseBrowser } from "@/lib/supabase-browser";
 
 // ---------- portfolio constants ----------
 const PORTFOLIO = ["spheredrones.com.au", "spheregroup.com.au", "curouav.com", "sidero.com.au", "parisradio.com.au"];
@@ -92,15 +92,11 @@ function downloadBlob(content: string, name: string, type: string) {
 }
 
 // ---------- small components ----------
+// Flags come from the locally-bundled flag-icons package (vendored, no external
+// CDN — the platform's Tailscale network has no guaranteed CDN reachability).
 function Flag({ cc }: { cc: string }) {
-  const [failed, setFailed] = useState(false);
   if (!cc || cc.length !== 2 || cc === "??") return null;
-  if (failed) return <span className="inline-block shrink-0 rounded bg-neutral-200 px-1 text-[9px] font-bold leading-4 text-neutral-600" title={cc}>{cc.toUpperCase()}</span>;
-  return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img src={`https://flagcdn.com/16x12/${cc.toLowerCase()}.png`} srcSet={`https://flagcdn.com/32x24/${cc.toLowerCase()}.png 2x`}
-      width={16} height={12} alt={cc} title={cc} className="inline-block shrink-0 rounded-[1px]" onError={() => setFailed(true)} />
-  );
+  return <span className={`fi fi-${cc.toLowerCase()} shrink-0 rounded-[1px]`} style={{ width: 16, height: 12 }} title={cc.toUpperCase()} />;
 }
 
 function Card({ label, value, sub, tone = "slate" }: { label: string; value: React.ReactNode; sub?: string; tone?: "slate" | "green" | "red" | "amber" | "indigo" }) {
@@ -229,11 +225,10 @@ export default function DashboardPage() {
         freshRows = d.rows;
         setRows(d.rows); setReports(d.reports); setIpInfo({ ...d.ipInfo, ...MANUAL_IPINFO });
         setLoadError(null);
-      } else if (res.status === 401 || res.status === 403) {
-        window.location.href = "/login";
       } else {
-        // A non-auth error (500, or a dev cold-compile 404) must not masquerade as
-        // "no data" — surface it so the empty state isn't misread as an empty dataset.
+        // Any error (500, or a dev cold-compile 404) must not masquerade as "no
+        // data" — surface it so the empty state isn't misread as an empty dataset.
+        // Auth is handled upstream by the platform, so a 401 here means misconfig.
         setLoadError(`Couldn't load report data (server responded ${res.status}). Your data is safe — try refreshing.`);
       }
     } catch (e) {
@@ -254,11 +249,6 @@ export default function DashboardPage() {
     setRefreshing(false);
   }, [refreshDns]);
   useEffect(() => { void (async () => { await refreshData(); setLoaded(true); })(); }, [refreshData]);
-
-  const signOut = async () => {
-    await supabaseBrowser().auth.signOut();
-    window.location.href = "/login";
-  };
 
   // ---------- upload ----------
   const handleFiles = useCallback(async (files: File[]) => {
@@ -585,7 +575,6 @@ export default function DashboardPage() {
               <button onClick={exportCsv} className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100"><FileDown size={14} /> CSV</button>
               <button onClick={exportBackup} className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100"><Download size={14} /> Backup</button>
             </>)}
-            <button onClick={() => void signOut()} className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100"><LogOut size={14} /> Sign out</button>
           </div>
         </div>
 

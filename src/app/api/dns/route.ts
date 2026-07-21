@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireUser, AuthError } from "@/lib/auth";
+import { getIdentity, IdentityError } from "@/lib/auth";
 import { dnsCheckSchema } from "@/lib/validation";
 import { spfTerms, SPF_COUNT_CAP } from "@/lib/spf";
 import { Resolver } from "node:dns/promises";
@@ -101,10 +101,10 @@ async function runChecks(observedSelectors: Record<string, string[]>) {
 
 export async function GET() {
   try {
-    await requireUser();
+    await getIdentity();
     return NextResponse.json({ results: await runChecks({}) });
   } catch (e) {
-    if (e instanceof AuthError) return NextResponse.json({ error: e.message }, { status: e.status });
+    if (e instanceof IdentityError) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
     console.error("dns GET failed", e);
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
@@ -112,12 +112,12 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    await requireUser();
+    await getIdentity();
     const parsed = dnsCheckSchema.safeParse(await req.json().catch(() => ({})));
     if (!parsed.success) return NextResponse.json({ error: "Invalid input" }, { status: 400 });
     return NextResponse.json({ results: await runChecks(parsed.data.selectors ?? {}) });
   } catch (e) {
-    if (e instanceof AuthError) return NextResponse.json({ error: e.message }, { status: e.status });
+    if (e instanceof IdentityError) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
     console.error("dns POST failed", e);
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }

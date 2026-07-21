@@ -2,14 +2,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@/lib/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth")>();
-  return { ...actual, requireUser: vi.fn().mockResolvedValue({ id: "u1", email: "josh@spheregroup.com.au" }) };
+  return { ...actual, getIdentity: vi.fn().mockResolvedValue({ email: "josh@spheregroup.com.au", username: "josh" }) };
 });
 
 const { findMany, upsert } = vi.hoisted(() => ({
   findMany: vi.fn().mockResolvedValue([]),
   upsert: vi.fn().mockImplementation(({ create }) => Promise.resolve(create)),
 }));
-vi.mock("@/lib/db", () => ({ db: { ipInfo: { findMany, upsert } } }));
+vi.mock("@/lib/db", () => ({ db: { ipInfo: { findMany, upsert } }, ensureSchema: vi.fn().mockResolvedValue(undefined) }));
 
 const { writeAudit } = vi.hoisted(() => ({ writeAudit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("@/lib/audit", () => ({ writeAudit }));
@@ -47,12 +47,18 @@ describe("POST /api/enrich audit logging", () => {
   it("re-enriches a cached row whose geo previously came back empty", async () => {
     findMany.mockResolvedValue([{ ip: "8.8.4.4", org: "", country: "", cc: "", service: "", ptr: "", manual: false }]);
     vi.stubGlobal("fetch", batchOk({ "8.8.4.4": { ip: "8.8.4.4", hostname: "dns.google", country: "US", org: "AS15169 Google LLC" } }));
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ "8.8.4.4": { ip: "8.8.4.4", hostname: "dns.google", country: "US", org: "AS15169 Google LLC" } }) });
+    vi.stubGlobal("fetch", fetchSpy);
     const res = await call(["8.8.4.4"]);
     const body = await res.json();
     expect(upsert).toHaveBeenCalledTimes(1);
     // country name derived from code, ASN prefix stripped, hostname → ptr
     expect(upsert.mock.calls[0][0].create).toMatchObject({ cc: "US", country: "United States", org: "Google LLC", ptr: "dns.google" });
     expect(body.results[0]).toMatchObject({ ip: "8.8.4.4", cc: "US", country: "United States" });
+    // token must travel in the Authorization header, never the URL query string
+    const [url, opts] = fetchSpy.mock.calls[0];
+    expect(String(url)).not.toContain("token");
+    expect((opts.headers as Record<string, string>).Authorization).toBe("Bearer test-token");
   });
 
   it("skips a cached row that already has a country", async () => {

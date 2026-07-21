@@ -1,0 +1,34 @@
+{
+  "name": "dmarc-dashboard",
+  "track": 2,
+  "port": 8080,
+  "owners": ["josh@spheregroup.com.au"],
+  "healthcheck": "/healthz",
+  "readiness": "/readyz",
+  "governance": {
+    "tier": "T2",
+    "rationale": "Reach and impact are low (primarily Josh + marketing, internal data, minor if down), which alone would be T1 — but the app creates records and calls external APIs (ingests DMARC reports, writes an audit log, calls ipinfo.io and public DNS), and the standard floors record-creating apps at T2. Not T3: no customer/compliance/operational data, nothing safety- or delivery-affecting.",
+    "intake": {
+      "reliesOn": "one team (marketing; primarily the owner)",
+      "data": "internal",
+      "writesSendsTriggers": "creates records + calls external APIs",
+      "impactIfWrongOrDownADay": "minor",
+      "usesAiAgentsConnectors": false
+    }
+  },
+  "access": {
+    "model": "single-role",
+    "rationale": "One shared team dataset; every authorised user sees the same data. No in-app roles — Authentik group membership is the only gate.",
+    "authentikGroup": "dmarc-dashboard-users",
+    "groupRoleMap": {}
+  },
+  "data": {
+    "database": "postgres"
+  },
+  "egress": [
+    { "host": "ipinfo.io", "protocol": "https", "why": "IP geolocation enrichment (server-side, batch)" },
+    { "host": "1.1.1.1", "protocol": "dns", "why": "public DNS resolver for live DMARC/SPF/DKIM/BIMI record checks" },
+    { "host": "8.8.8.8", "protocol": "dns", "why": "public DNS resolver (fallback)" }
+  ],
+  "secrets": ["DATABASE_URL", "IPINFO_TOKEN"]
+}

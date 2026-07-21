@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { requireUser, AuthError } from "@/lib/auth";
+import { getIdentity, IdentityError } from "@/lib/auth";
 import { enrichSchema } from "@/lib/validation";
-import { db } from "@/lib/db";
+import { db, ensureSchema } from "@/lib/db";
 import { OVERRIDES } from "@/lib/ip-overrides";
 import { writeAudit } from "@/lib/audit";
 import { normalizeIpinfo, type GeoResult, type IpinfoEntry } from "@/lib/geo";
@@ -20,9 +20,11 @@ async function lookupBatch(ips: string[]): Promise<Map<string, GeoResult>> {
   for (let i = 0; i < ips.length; i += 1000) {
     const chunk = ips.slice(i, i + 1000);
     try {
-      const res = await fetch(`https://ipinfo.io/batch?token=${token}`, {
+      const res = await fetch("https://ipinfo.io/batch", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        // Token in the Authorization header, not the query string — keeps the
+        // credential out of any request-logging surface.
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify(chunk),
       });
       if (!res.ok) continue; // 429/auth failure → leave this chunk for a later retry
@@ -40,9 +42,10 @@ async function lookupBatch(ips: string[]): Promise<Map<string, GeoResult>> {
 
 export async function POST(req: Request) {
   try {
-    const user = await requireUser();
+    const user = await getIdentity();
     const parsed = enrichSchema.safeParse(await req.json());
     if (!parsed.success) return NextResponse.json({ error: "Invalid input" }, { status: 400 });
+    await ensureSchema();
 
     const ips = [...new Set(parsed.data.ips)];
 
@@ -94,7 +97,7 @@ export async function POST(req: Request) {
       }),
     });
   } catch (e) {
-    if (e instanceof AuthError) return NextResponse.json({ error: e.message }, { status: e.status });
+    if (e instanceof IdentityError) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
     console.error("enrich POST failed", e);
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }

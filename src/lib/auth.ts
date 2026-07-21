@@ -1,23 +1,25 @@
-import { createServerClient } from "@supabase/ssr";
-import { cookies } from "next/headers";
-import { evaluateAuth } from "@/lib/auth-core";
+import { headers } from "next/headers";
 
-export class AuthError extends Error {
-  constructor(public status: 401 | 403, message: string) {
+// The Sphere platform authenticates every request BEFORE it reaches this app:
+// Authentik (Google Workspace SSO) via Traefik forward-auth, with the network
+// gated by Tailscale. The app does not do its own login/OAuth/domain check.
+//
+// We only READ the identity Authentik forwards, purely to stamp the audit log.
+// These X-authentik-* headers are trustworthy only because the container binds
+// to the proxy network and never publishes a host port — so a request without
+// them did not come through the proxy, and we fail closed.
+
+export class IdentityError extends Error {
+  constructor(message = "No authenticated identity on request") {
     super(message);
-    this.name = "AuthError";
+    this.name = "IdentityError";
   }
 }
 
-export async function requireUser(): Promise<{ id: string; email: string }> {
-  const cookieStore = await cookies();
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    { cookies: { getAll: () => cookieStore.getAll(), setAll: () => {} } }
-  );
-  const { data: { user } } = await supabase.auth.getUser();
-  const verdict = evaluateAuth(user?.email ?? null, process.env.ALLOWED_EMAIL_DOMAINS ?? "");
-  if (!verdict.ok) throw new AuthError(verdict.status, verdict.status === 401 ? "Unauthorised" : "Forbidden");
-  return { id: user!.id, email: user!.email! };
+export async function getIdentity(): Promise<{ email: string; username: string }> {
+  const h = await headers();
+  const email = (h.get("x-authentik-email") ?? "").trim().toLowerCase();
+  const username = (h.get("x-authentik-username") ?? "").trim() || email;
+  if (!email) throw new IdentityError();
+  return { email, username };
 }

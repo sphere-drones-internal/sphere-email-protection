@@ -10,6 +10,9 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
+  // Standalone output → a self-contained server bundle the container runs with
+  // `node server.js`, no full node_modules in the runtime image.
+  output: "standalone",
   async headers() {
     return [{ source: "/(.*)", headers: securityHeaders }];
   },

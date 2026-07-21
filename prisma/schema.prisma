@@ -3,9 +3,10 @@ generator client {
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  provider = "postgresql"
+  // Platform-injected: a per-app database + scoped role on the shared platform
+  // Postgres. No Supabase pooler / directUrl split.
+  url      = env("DATABASE_URL")
 }
 
 model Report {

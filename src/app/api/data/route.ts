@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
-import { requireUser, AuthError } from "@/lib/auth";
-import { db } from "@/lib/db";
+import { getIdentity, IdentityError } from "@/lib/auth";
+import { db, ensureSchema } from "@/lib/db";
 import { MANUAL_IPINFO } from "@/lib/dmarc";
 
 export async function GET() {
   try {
-    await requireUser();
+    await getIdentity();
+    await ensureSchema();
     const [reports, rows, ipInfoRows] = await Promise.all([
       db.report.findMany({
         select: { id: true, org: true, domain: true, begin: true, end: true, policyP: true, policySp: true, policyPct: true },
@@ -34,7 +35,7 @@ export async function GET() {
       ipInfo,
     });
   } catch (e) {
-    if (e instanceof AuthError) return NextResponse.json({ error: e.message }, { status: e.status });
+    if (e instanceof IdentityError) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
     console.error("data GET failed", e);
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
