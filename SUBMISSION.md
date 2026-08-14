@@ -44,6 +44,20 @@ closed if it's absent and binds to the proxy network only (no published host por
   `DATABASE_URL` injected. Schema created at first boot by `ensureSchema()`.
 - No customer PII. Starting clean — no data migrated from the previous Supabase build.
 
+## Data flows (T2 register)
+
+| Flow | In / Out | Detail |
+|------|----------|--------|
+| Report ingestion | In | User uploads DMARC aggregate reports (`.xml/.gz/.zip`) or JSON backup → parsed → `reports`/`report_rows`. Deduped by report ID. |
+| DNS checks | Out → In | Server queries public resolvers (1.1.1.1/8.8.8.8) for the portfolio domains' DMARC/SPF/DKIM/BIMI records; results are transient (not stored). |
+| IP enrichment | Out → In | Server sends sending-source IPs to ipinfo.io (batch) → country/org/hostname cached in `ip_info`. |
+| Identity | In | `X-authentik-email` (from the proxy) is read per request, written only to `audit_log`. |
+| Audit | Internal | Every mutation writes `{ user, action, detail, at }` to `audit_log`. |
+| Export | Out | User-initiated CSV / JSON backup / markdown summary downloads (client-side, from already-loaded data). |
+
+No data leaves the tailnet except the two declared egress calls below. No customer PII;
+retention is indefinite in-app (operator-managed).
+
 ## External services (egress to allow)
 
 | Destination | Protocol | Why |
@@ -69,7 +83,7 @@ closed if it's absent and binds to the proxy network only (no published host por
 - [x] Binds to proxy network only; no published host port
 - [x] `sphere-app.json` manifest present
 - [x] `npm run smoke` boots the built standalone server vs Postgres and asserts health + fail-closed auth + schema creation
-- [x] T2 controls: README, RUNBOOK, structured audit trail, rollback plan
+- [x] T2 controls: README, RUNBOOK, structured JSON logging, data-flow register (above), structured audit trail, rollback plan
 - [ ] **Infra (deployer):** create the `dmarc-dashboard-users` Authentik group; allowlist `^/_next/` + `^/favicon.ico$` as unauthenticated static paths in forward-auth
 - [ ] **Known follow-up:** 2 pre-existing ESLint `react-hooks/purity` findings (`Date.now()` in render) — cosmetic, non-blocking
 

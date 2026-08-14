@@ -33,6 +33,22 @@ Operational reference. Governance tier **T2** (see `sphere-app.json`).
 | "Identify sources" resolves nothing | `IPINFO_TOKEN` unset or rate-limited | Set/verify the token; enrichment retries and self-heals |
 | Report upload silently adds nothing | Duplicate report IDs (already ingested) | Expected — ingestion is deduped by report ID |
 
+## Logs & alerting
+
+Server logs are **structured JSON**, one line per event (`{ ts, level, event, ... }`);
+errors serialise to `{ name, message }` and never carry a stack or secret. Key events:
+
+| Event | Level | Meaning |
+|-------|-------|---------|
+| `report.upload`, `backup.import`, `enrich.completed` | info | Successful ingestion/enrichment (with counts) |
+| `enrich.token.missing` | warn | `IPINFO_TOKEN` unset — geo enrichment disabled |
+| `enrich.batch.failed` | error | ipinfo call failed (rate-limit/network) — IPs stay retryable |
+| `*.get.failed` / `*.post.failed` / `import.failed` | error | Unhandled route error (returned to client as generic 500) |
+| `audit.write.failed` | error | Audit row couldn't be written (request still served) |
+
+**Suggested alerts:** any `level=error` sustained, and `audit.write.failed` (audit
+gaps). `enrich.token.missing` is a config nudge, not a page.
+
 ## Data
 
 - Tables: `reports`, `report_rows`, `ip_info`, `published_records`, `audit_log`.

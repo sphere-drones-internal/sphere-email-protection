@@ -4,6 +4,7 @@ import { enrichSchema } from "@/lib/validation";
 import { db, ensureSchema } from "@/lib/db";
 import { OVERRIDES } from "@/lib/ip-overrides";
 import { writeAudit } from "@/lib/audit";
+import { log } from "@/lib/log";
 import { normalizeIpinfo, type GeoResult, type IpinfoEntry } from "@/lib/geo";
 
 // Resolves country/org/hostname for many IPs at once via ipinfo.io's batch
@@ -14,7 +15,7 @@ async function lookupBatch(ips: string[]): Promise<Map<string, GeoResult>> {
   if (!ips.length) return out;
   const token = process.env.IPINFO_TOKEN;
   if (!token) {
-    console.error("IPINFO_TOKEN is not set — geo enrichment is disabled until it is configured");
+    log.warn("enrich.token.missing", { detail: "IPINFO_TOKEN is not set — geo enrichment disabled until configured" });
     return out;
   }
   for (let i = 0; i < ips.length; i += 1000) {
@@ -34,7 +35,7 @@ async function lookupBatch(ips: string[]): Promise<Map<string, GeoResult>> {
         if (g) out.set(ip, g);
       }
     } catch (e) {
-      console.error("ipinfo batch lookup failed", e);
+      log.error("enrich.batch.failed", { err: e });
     }
   }
   return out;
@@ -87,7 +88,10 @@ export async function POST(req: Request) {
       enriched++;
     }
 
-    if (toEnrich.length) await writeAudit(user.email, "ipinfo.enrich", { requested: ips.length, enriched, failed });
+    if (toEnrich.length) {
+      log.info("enrich.completed", { user: user.email, requested: ips.length, enriched, failed });
+      await writeAudit(user.email, "ipinfo.enrich", { requested: ips.length, enriched, failed });
+    }
 
     return NextResponse.json({
       results: ips.map((ip) => {
@@ -98,7 +102,7 @@ export async function POST(req: Request) {
     });
   } catch (e) {
     if (e instanceof IdentityError) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
-    console.error("enrich POST failed", e);
+    log.error("enrich.post.failed", { err: e });
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
 }

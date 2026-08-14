@@ -3,6 +3,7 @@ import { getIdentity, IdentityError } from "@/lib/auth";
 import { uploadSchema } from "@/lib/validation";
 import { db, ensureSchema } from "@/lib/db";
 import { writeAudit } from "@/lib/audit";
+import { log } from "@/lib/log";
 
 export async function POST(req: Request) {
   try {
@@ -48,11 +49,12 @@ export async function POST(req: Request) {
       }
     }
 
+    log.info("report.upload", { user: user.email, attempted: ids.length, added, skipped });
     await writeAudit(user.email, "report.upload", { attempted: ids.length, added, skipped });
     return NextResponse.json({ added, skipped });
   } catch (e) {
     if (e instanceof IdentityError) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
-    console.error("reports POST failed", e);
+    log.error("reports.post.failed", { err: e });
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
 }

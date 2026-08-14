@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getIdentity, IdentityError } from "@/lib/auth";
 import { db, ensureSchema } from "@/lib/db";
 import { MANUAL_IPINFO } from "@/lib/dmarc";
+import { log } from "@/lib/log";
 
 export async function GET() {
   try {
@@ -36,7 +37,7 @@ export async function GET() {
     });
   } catch (e) {
     if (e instanceof IdentityError) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
-    console.error("data GET failed", e);
+    log.error("data.get.failed", { err: e });
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
 }

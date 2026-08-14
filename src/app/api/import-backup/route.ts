@@ -3,6 +3,7 @@ import { getIdentity, IdentityError } from "@/lib/auth";
 import { backupSchema } from "@/lib/validation";
 import { db, ensureSchema } from "@/lib/db";
 import { writeAudit } from "@/lib/audit";
+import { log } from "@/lib/log";
 
 type LegacyRow = Record<string, unknown>;
 
@@ -82,11 +83,12 @@ export async function POST(req: Request) {
       }
     }
 
+    log.info("backup.import", { user: user.email, added, skipped: byReport.size - added, ipInfoSeeded: ipUpserts });
     await writeAudit(user.email, "backup.import", { reportsAdded: added, reportsSkipped: byReport.size - added, ipInfoSeeded: ipUpserts });
     return NextResponse.json({ added, skipped: byReport.size - added });
   } catch (e) {
     if (e instanceof IdentityError) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
-    console.error("import failed", e);
+    log.error("import.failed", { err: e });
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
 }

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getIdentity, IdentityError } from "@/lib/auth";
 import { dnsCheckSchema } from "@/lib/validation";
 import { spfTerms, SPF_COUNT_CAP } from "@/lib/spf";
+import { log } from "@/lib/log";
 import { Resolver } from "node:dns/promises";
 
 const DOMAINS = [
@@ -105,7 +106,7 @@ export async function GET() {
     return NextResponse.json({ results: await runChecks({}) });
   } catch (e) {
     if (e instanceof IdentityError) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
-    console.error("dns GET failed", e);
+    log.error("dns.get.failed", { err: e });
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
 }
@@ -118,7 +119,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ results: await runChecks(parsed.data.selectors ?? {}) });
   } catch (e) {
     if (e instanceof IdentityError) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
-    console.error("dns POST failed", e);
+    log.error("dns.post.failed", { err: e });
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
 }
