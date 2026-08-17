@@ -43,6 +43,13 @@ server-side, and ingests through the same deduped path as a manual upload — so
 overlapping runs are safe. It's a **no-op until all three `GMAIL_*` secrets are set**.
 **To pause it:** clear the `GMAIL_*` secrets and redeploy.
 
+**One-time historical backfill (after first deploy):** the platform Postgres starts
+empty, so only new mail arrives via the hourly window. To pull the full mailbox
+history once, temporarily set the env var `GMAIL_QUERY=has:attachment` (removes the
+3-day window), trigger a run via the "Fetch mail" button (or `POST /api/ingest`),
+then remove `GMAIL_QUERY` so it returns to the rolling window. It's idempotent
+(deduped by report ID), so it's safe to run and re-run.
+
 ## Logs & alerting
 
 Server logs are **structured JSON**, one line per event (`{ ts, level, event, ... }`);
