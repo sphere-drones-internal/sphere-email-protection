@@ -93,8 +93,11 @@ ingestion; read-only Gmail scope — auto-fetch stays off until all three are se
 
 ## Verification (this commit)
 
-`npx tsc --noEmit` clean · `npm test` 66/66 · `npx next build` succeeds (standalone) ·
+`npx tsc --noEmit` clean · `npm test` 83/83 · `npx next build` succeeds (standalone) ·
 `npm run smoke` passes (health, readiness, fail-closed 401, header-auth 200, schema creation).
+Gmail auto-ingestion verified live against the mailbox (fetch → parse → dedupe-insert,
+including a full historical backfill). Docker image build, Trivy/SAST and the
+image-level smoke run in the platform's own qualify pipeline (no Docker locally).
 
 Submit via the platform — do not self-deploy. The qualify pipeline and a human
 reviewer handle approval and deployment.
