@@ -28,7 +28,9 @@
   "egress": [
     { "host": "ipinfo.io", "protocol": "https", "why": "IP geolocation enrichment (server-side, batch)" },
     { "host": "1.1.1.1", "protocol": "dns", "why": "public DNS resolver for live DMARC/SPF/DKIM/BIMI record checks" },
-    { "host": "8.8.8.8", "protocol": "dns", "why": "public DNS resolver (fallback)" }
+    { "host": "8.8.8.8", "protocol": "dns", "why": "public DNS resolver (fallback)" },
+    { "host": "gmail.googleapis.com", "protocol": "https", "why": "read DMARC report emails/attachments from the mailbox (auto-ingest)" },
+    { "host": "oauth2.googleapis.com", "protocol": "https", "why": "exchange the Gmail refresh token for an access token" }
   ],
-  "secrets": ["DATABASE_URL", "IPINFO_TOKEN"]
+  "secrets": ["DATABASE_URL", "IPINFO_TOKEN", "GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"]
 }

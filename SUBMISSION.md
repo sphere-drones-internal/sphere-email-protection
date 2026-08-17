@@ -48,7 +48,8 @@ closed if it's absent and binds to the proxy network only (no published host por
 
 | Flow | In / Out | Detail |
 |------|----------|--------|
-| Report ingestion | In | User uploads DMARC aggregate reports (`.xml/.gz/.zip`) or JSON backup → parsed → `reports`/`report_rows`. Deduped by report ID. |
+| Report ingestion (manual) | In | User uploads DMARC aggregate reports (`.xml/.gz/.zip`) or JSON backup → parsed → `reports`/`report_rows`. Deduped by report ID. |
+| Report ingestion (auto) | Out → In | Hourly in-process job reads DMARC report emails from the mailbox via the Gmail API (read-only), parses attachments server-side, ingests through the same deduped path. Also runnable on demand from the UI. |
 | DNS checks | Out → In | Server queries public resolvers (1.1.1.1/8.8.8.8) for the portfolio domains' DMARC/SPF/DKIM/BIMI records; results are transient (not stored). |
 | IP enrichment | Out → In | Server sends sending-source IPs to ipinfo.io (batch) → country/org/hostname cached in `ip_info`. |
 | Identity | In | `X-authentik-email` (from the proxy) is read per request, written only to `audit_log`. |
@@ -64,10 +65,13 @@ retention is indefinite in-app (operator-managed).
 |-------------|----------|-----|
 | ipinfo.io | HTTPS | IP geolocation enrichment (batch, server-side) |
 | 1.1.1.1 / 8.8.8.8 | DNS | Live DMARC/SPF/DKIM/BIMI record checks |
+| gmail.googleapis.com / oauth2.googleapis.com | HTTPS | Read DMARC report emails for auto-ingestion (read-only scope) |
 
 ## Secrets (Coolify runtime)
 
-`DATABASE_URL` (injected), `IPINFO_TOKEN` (geo enrichment; app self-heals once set).
+`DATABASE_URL` (injected), `IPINFO_TOKEN` (geo enrichment; app self-heals once set),
+`GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` / `GMAIL_REFRESH_TOKEN` (auto report
+ingestion; read-only Gmail scope — auto-fetch stays off until all three are set).
 
 ## Standards checklist
 

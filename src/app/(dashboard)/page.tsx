@@ -10,7 +10,7 @@
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
-import { Upload, CheckCircle2, AlertTriangle, Globe, FileText, Download, RefreshCw, Sparkles, ChevronRight, ChevronDown, ExternalLink, TrendingUp, TrendingDown, Minus, Wrench, ClipboardList, FileDown } from "lucide-react";
+import { Upload, CheckCircle2, AlertTriangle, Globe, FileText, Download, RefreshCw, Sparkles, ChevronRight, ChevronDown, ExternalLink, TrendingUp, TrendingDown, Minus, Wrench, ClipboardList, FileDown, Mail } from "lucide-react";
 import "flag-icons/css/flag-icons.min.css";
 import { classifyRow, fixHint, MANUAL_IPINFO, type TrimmedRow, type ParsedReport } from "@/lib/dmarc";
 import { buildOverview } from "@/lib/summary";
@@ -185,6 +185,7 @@ export default function DashboardPage() {
   const [enriching, setEnriching] = useState(false);
   const [enrichPct, setEnrichPct] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  const [ingesting, setIngesting] = useState(false);
   const [tab, setTab] = useState<TabKey>("compliant");
   const [openSrc, setOpenSrc] = useState<Record<string, boolean>>({});
   const [closedDoms, setClosedDoms] = useState<Record<string, boolean>>({});
@@ -249,6 +250,28 @@ export default function DashboardPage() {
     setRefreshing(false);
   }, [refreshDns]);
   useEffect(() => { void (async () => { await refreshData(); setLoaded(true); })(); }, [refreshData]);
+
+  // ---------- fetch from Gmail (manual trigger; the hourly run is server-side) ----------
+  const fetchMail = useCallback(async () => {
+    setIngesting(true); setMsg(null);
+    try {
+      const res = await fetch("/api/ingest", { method: "POST" });
+      if (res.ok) {
+        const d = (await res.json()) as { messages: number; added: number; skipped: number; errors: number };
+        await refreshData();
+        const parts = [`Checked ${d.messages} message${d.messages !== 1 ? "s" : ""}`];
+        if (d.added) parts.push(`imported ${d.added} report${d.added !== 1 ? "s" : ""}`);
+        if (d.skipped) parts.push(`${d.skipped} already in the dataset`);
+        if (d.errors) parts.push(`${d.errors} failed to parse`);
+        setMsg(parts.join(", ") + ".");
+      } else if (res.status === 503) {
+        setMsg("Gmail ingestion isn't configured yet.");
+      } else {
+        setMsg(`Fetch failed (server responded ${res.status}).`);
+      }
+    } catch { setMsg("Couldn't reach the server to fetch mail."); }
+    setIngesting(false);
+  }, [refreshData]);
 
   // ---------- upload ----------
   const handleFiles = useCallback(async (files: File[]) => {
@@ -569,6 +592,7 @@ export default function DashboardPage() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <button onClick={() => void fetchMail()} disabled={ingesting} className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100 disabled:opacity-60"><Mail size={14} className={ingesting ? "animate-pulse" : ""} /> {ingesting ? "Fetching…" : "Fetch mail"}</button>
             <button onClick={() => void refreshData()} disabled={refreshing} className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100 disabled:opacity-60"><RefreshCw size={14} className={refreshing ? "animate-spin" : ""} /> Refresh</button>
             {rows.length > 0 && (<>
               <button onClick={exportSummary} className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100"><ClipboardList size={14} /> Summary</button>

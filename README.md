@@ -9,8 +9,9 @@ Built for the **Sphere Coolify platform** (Tailscale + Authentik + Traefik).
 
 ## What it does
 
-- Upload DMARC aggregate reports (`.xml`, `.xml.gz`, `.zip`) or a JSON backup; they're
-  parsed, deduped by report ID, and stored in Postgres.
+- **Automatically ingest** DMARC reports from the mailbox hourly (see below), or
+  upload them manually (`.xml`, `.xml.gz`, `.zip`) or as a JSON backup. Parsed,
+  deduped by report ID, stored in Postgres.
 - Live DNS checks per portfolio domain: DMARC policy, SPF (with 10-lookup-limit
   monitoring), DKIM selector probing, BIMI.
 - Server-side IP geolocation enrichment via ipinfo.io (batch).
@@ -45,6 +46,35 @@ The platform owns **auth, TLS, and the network** — this app does **not**:
 |-----|----------|---------|
 | `DATABASE_URL` | yes | Platform-injected Postgres connection string |
 | `IPINFO_TOKEN` | recommended | ipinfo.io token for geo enrichment; enrichment self-heals once set |
+| `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` / `GMAIL_REFRESH_TOKEN` | optional | Enable auto report ingestion; auto-fetch stays off until all three are set |
+| `GMAIL_LABEL_ID` | optional | Gmail label to read (default: the mailbox's "DMARC Reports" label) |
+
+## Automated report ingestion (Gmail)
+
+An in-process job runs **hourly** and reads DMARC report emails under the mailbox's
+"DMARC Reports" label (read-only Gmail scope), parses attachments server-side, and
+ingests them through the same deduped path as a manual upload. There's also a
+**"Fetch mail"** button in the dashboard to run it on demand. It stays disabled until
+the three `GMAIL_*` secrets are set.
+
+**One-time setup — mint the refresh token** (do this once; the values become Coolify secrets):
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), create a project and
+   **enable the Gmail API**. Configure the OAuth consent screen (Internal).
+2. Create an **OAuth client ID → type "Web application"** (not Desktop — the token is
+   minted via the Playground, which needs a web client). Under **Authorized redirect
+   URIs** add exactly `https://developers.google.com/oauthplayground`. Note the
+   **client ID** and **client secret**.
+3. Open the [OAuth 2.0 Playground](https://developers.google.com/oauthplayground/) →
+   **gear (⚙️) → tick "Use your own OAuth credentials"** → paste that client's ID and
+   secret. *(Skipping this ties the token to Google's Playground client instead of
+   yours, and redemption then fails with `unauthorized_client`.)*
+4. Enter scope `https://www.googleapis.com/auth/gmail.readonly` → **Authorize APIs**,
+   sign in **as the mailbox owner**, allow → **Exchange authorization code for tokens**
+   → copy the **refresh token**.
+5. Set `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET` (the same web client from step 2) and
+   `GMAIL_REFRESH_TOKEN` as secrets. If the mailbox uses a different label, set
+   `GMAIL_LABEL_ID` too.
 
 ## Local development
 
