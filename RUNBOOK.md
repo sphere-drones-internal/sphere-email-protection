@@ -32,6 +32,16 @@ Operational reference. Governance tier **T2** (see `sphere-app.json`).
 | Dashboard loads but flags/styles missing | Static assets 302'd to SSO | Allowlist `^/_next/`, `^/favicon.ico$` as unauthenticated in the Authentik forward-auth config (infra, not code) |
 | "Identify sources" resolves nothing | `IPINFO_TOKEN` unset or rate-limited | Set/verify the token; enrichment retries and self-heals |
 | Report upload silently adds nothing | Duplicate report IDs (already ingested) | Expected — ingestion is deduped by report ID |
+| Auto-ingest imports nothing | `GMAIL_*` unset, refresh token revoked/expired, or simply no new mail | Check `ingest.*` logs; re-mint the refresh token if revoked (see README) |
+
+## Gmail auto-ingestion
+
+An in-process job runs **hourly** (first run ~1 min after boot) and also on demand
+via the dashboard's **"Fetch mail"** button. It reads DMARC report emails under the
+mailbox's "DMARC Reports" label (read-only Gmail scope), parses attachments
+server-side, and ingests through the same deduped path as a manual upload — so
+overlapping runs are safe. It's a **no-op until all three `GMAIL_*` secrets are set**.
+**To pause it:** clear the `GMAIL_*` secrets and redeploy.
 
 ## Logs & alerting
 
@@ -41,6 +51,10 @@ errors serialise to `{ name, message }` and never carry a stack or secret. Key e
 | Event | Level | Meaning |
 |-------|-------|---------|
 | `report.upload`, `backup.import`, `enrich.completed` | info | Successful ingestion/enrichment (with counts) |
+| `ingest.scheduler.started` / `ingest.scheduler.skipped` | info | Hourly Gmail auto-fetch started (or skipped — no credentials) |
+| `ingest.completed` | info | An auto/manual Gmail fetch finished (messages/reports/added/skipped/errors) |
+| `ingest.message.failed` / `ingest.parse.failed` | warn | A single message or attachment couldn't be fetched/parsed — the run continues |
+| `ingest.disabled` | warn | Ingestion triggered but Gmail credentials aren't configured |
 | `enrich.token.missing` | warn | `IPINFO_TOKEN` unset — geo enrichment disabled |
 | `enrich.batch.failed` | error | ipinfo call failed (rate-limit/network) — IPs stay retryable |
 | `*.get.failed` / `*.post.failed` / `import.failed` | error | Unhandled route error (returned to client as generic 500) |
