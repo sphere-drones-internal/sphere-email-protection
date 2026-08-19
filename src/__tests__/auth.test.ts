@@ -19,16 +19,8 @@ describe("getIdentity", () => {
     await expect(getIdentity()).resolves.toEqual({ email: "ops@spheredrones.com.au", username: "ops@spheredrones.com.au" });
   });
 
-  it("throws IdentityError (fail closed) when no identity header is present outside dev", async () => {
-    // vitest runs with NODE_ENV=test, so the dev fallback does not apply here.
+  it("throws IdentityError (fail closed) when no identity header is present", async () => {
     withHeaders({});
     await expect(getIdentity()).rejects.toBeInstanceOf(IdentityError);
-  });
-
-  it("falls back to a fixed dev identity only under NODE_ENV=development", async () => {
-    withHeaders({});
-    vi.stubEnv("NODE_ENV", "development");
-    await expect(getIdentity()).resolves.toEqual({ email: "dev@spheregroup.com.au", username: "dev@spheregroup.com.au" });
-    vi.unstubAllEnvs();
   });
 });

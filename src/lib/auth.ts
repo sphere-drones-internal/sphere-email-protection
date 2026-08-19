@@ -22,14 +22,7 @@ export async function getIdentity(): Promise<{ email: string; username: string }
   const username = (h.get("x-authentik-username") ?? "").trim() || email;
   if (email) return { email, username };
 
-  // Local dev only (`next dev`): there is no Authentik proxy to inject the header,
-  // so fall back to a fixed dev identity. Gated strictly to NODE_ENV==="development"
-  // — production and the test runner still fail closed, so the real trust boundary
-  // is untouched. Override the dev identity with DEV_IDENTITY_EMAIL if you like.
-  if (process.env.NODE_ENV === "development") {
-    const dev = (process.env.DEV_IDENTITY_EMAIL ?? "dev@spheregroup.com.au").trim().toLowerCase();
-    return { email: dev, username: dev };
-  }
-
+  // No Authentik-forwarded identity means the request did not come through the
+  // platform proxy. Fail closed in every environment — no env-based fallback.
   throw new IdentityError();
 }
