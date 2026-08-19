@@ -9,3 +9,7 @@ coverage
 .claude
 src/__tests__
 vitest.config.ts
+# Next.js 16 renamed the `middleware` convention to `proxy`; the CSP/nonce logic
+# now lives in src/proxy.ts. Keep the stale middleware file out of the build
+# context so Next never sees both files (it refuses to build when both exist).
+src/middleware.ts
