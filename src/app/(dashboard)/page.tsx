@@ -15,6 +15,7 @@ import "flag-icons/css/flag-icons.min.css";
 import { classifyRow, fixHint, MANUAL_IPINFO, type TrimmedRow, type ParsedReport } from "@/lib/dmarc";
 import { buildOverview } from "@/lib/summary";
 import { extractXml, parseReport } from "@/lib/dmarc-client";
+import { cacheGet, cacheSet } from "@/lib/client-cache";
 
 // ---------- portfolio constants ----------
 const PORTFOLIO = ["spheredrones.com.au", "spheregroup.com.au", "curouav.com", "sidero.com.au", "parisradio.com.au"];
@@ -179,6 +180,7 @@ export default function DashboardPage() {
   const [reports, setReports] = useState<ApiReport[]>([]);
   const [ipInfo, setIpInfo] = useState<Record<string, IpMeta>>({});
   const [loaded, setLoaded] = useState(false);
+  const [stale, setStale] = useState(false); // showing cached data while a fresh fetch runs
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -224,8 +226,10 @@ export default function DashboardPage() {
           dkimChecked: r.dkimChecked,
         };
       }
+      const checked = d.results[0]?.checkedAt ?? new Date().toISOString();
       setLiveDns(map);
-      setDnsChecked(d.results[0]?.checkedAt ?? new Date().toISOString());
+      setDnsChecked(checked);
+      void cacheSet("dns", { map, checked });
     } catch (e) { console.error("live DNS check failed", e); }
   }, []);
 
@@ -238,7 +242,8 @@ export default function DashboardPage() {
         const d = (await res.json()) as { rows: ApiRow[]; reports: ApiReport[]; ipInfo: Record<string, IpMeta> };
         freshRows = d.rows;
         setRows(d.rows); setReports(d.reports); setIpInfo({ ...d.ipInfo, ...MANUAL_IPINFO });
-        setLoadError(null);
+        setLoadError(null); setStale(false);
+        void cacheSet("data", d);
       } else {
         // Any error (500, or a dev cold-compile 404) must not masquerade as "no
         // data" — surface it so the empty state isn't misread as an empty dataset.
@@ -262,7 +267,23 @@ export default function DashboardPage() {
     await refreshDns(observed);
     setRefreshing(false);
   }, [refreshDns]);
-  useEffect(() => { void (async () => { await refreshData(); setLoaded(true); })(); }, [refreshData]);
+  useEffect(() => {
+    void (async () => {
+      // Paint the last-known data from cache immediately so the page isn't blank
+      // while the large fresh payload loads; then refresh in the background.
+      const [cachedData, cachedDns] = await Promise.all([
+        cacheGet<{ rows: ApiRow[]; reports: ApiReport[]; ipInfo: Record<string, IpMeta> }>("data"),
+        cacheGet<{ map: Record<string, PublishedRecord>; checked: string }>("dns"),
+      ]);
+      if (cachedData) {
+        setRows(cachedData.rows); setReports(cachedData.reports); setIpInfo({ ...cachedData.ipInfo, ...MANUAL_IPINFO });
+        setStale(true); setLoaded(true);
+      }
+      if (cachedDns) { setLiveDns(cachedDns.map); setDnsChecked(cachedDns.checked); }
+      await refreshData();
+      setLoaded(true);
+    })();
+  }, [refreshData]);
 
   // ---------- fetch from Gmail (manual trigger; the hourly run is server-side) ----------
   const fetchMail = useCallback(async () => {
@@ -621,7 +642,7 @@ export default function DashboardPage() {
             <img src="/sphere-mark.svg" alt="Sphere" className="h-10 w-10 shrink-0" />
             <div>
               <h1 className="font-heading text-xl font-medium text-sphere-dark">Email Authentication Dashboard</h1>
-              <p className="text-sm text-neutral-500">DMARC, SPF &amp; BIMI monitoring{hasData ? ` · ${m.range}` : ""}</p>
+              <p className="text-sm text-neutral-500">DMARC, SPF &amp; BIMI monitoring{hasData ? ` · ${m.range}` : ""}{stale && refreshing ? " · showing cached data, updating…" : ""}</p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
