@@ -181,6 +181,7 @@ export default function DashboardPage() {
   const [ipInfo, setIpInfo] = useState<Record<string, IpMeta>>({});
   const [loaded, setLoaded] = useState(false);
   const [stale, setStale] = useState(false); // showing cached data while a fresh fetch runs
+  const [editor, setEditor] = useState(false); // write access (upload/fetch/enrich); others are read-only
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -239,9 +240,10 @@ export default function DashboardPage() {
     try {
       const res = await fetch("/api/data");
       if (res.ok) {
-        const d = (await res.json()) as { rows: ApiRow[]; reports: ApiReport[]; ipInfo: Record<string, IpMeta> };
+        const d = (await res.json()) as { rows: ApiRow[]; reports: ApiReport[]; ipInfo: Record<string, IpMeta>; me?: { email: string; editor: boolean } };
         freshRows = d.rows;
         setRows(d.rows); setReports(d.reports); setIpInfo({ ...d.ipInfo, ...MANUAL_IPINFO });
+        setEditor(!!d.me?.editor);
         setLoadError(null); setStale(false);
         void cacheSet("data", d);
       } else {
@@ -272,11 +274,12 @@ export default function DashboardPage() {
       // Paint the last-known data from cache immediately so the page isn't blank
       // while the large fresh payload loads; then refresh in the background.
       const [cachedData, cachedDns] = await Promise.all([
-        cacheGet<{ rows: ApiRow[]; reports: ApiReport[]; ipInfo: Record<string, IpMeta> }>("data"),
+        cacheGet<{ rows: ApiRow[]; reports: ApiReport[]; ipInfo: Record<string, IpMeta>; me?: { email: string; editor: boolean } }>("data"),
         cacheGet<{ map: Record<string, PublishedRecord>; checked: string }>("dns"),
       ]);
       if (cachedData) {
         setRows(cachedData.rows); setReports(cachedData.reports); setIpInfo({ ...cachedData.ipInfo, ...MANUAL_IPINFO });
+        setEditor(!!cachedData.me?.editor);
         setStale(true); setLoaded(true);
       }
       if (cachedDns) { setLiveDns(cachedDns.map); setDnsChecked(cachedDns.checked); }
@@ -646,7 +649,7 @@ export default function DashboardPage() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <button onClick={() => void fetchMail()} disabled={ingesting} className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100 disabled:opacity-60"><Mail size={14} className={ingesting ? "animate-pulse" : ""} /> {ingesting ? "Fetching…" : "Fetch mail"}</button>
+            {editor && <button onClick={() => void fetchMail()} disabled={ingesting} className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100 disabled:opacity-60"><Mail size={14} className={ingesting ? "animate-pulse" : ""} /> {ingesting ? "Fetching…" : "Fetch mail"}</button>}
             <button onClick={() => void refreshData()} disabled={refreshing} className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100 disabled:opacity-60"><RefreshCw size={14} className={refreshing ? "animate-spin" : ""} /> Refresh</button>
             {rows.length > 0 && (<>
               <button onClick={exportSummary} className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100"><ClipboardList size={14} /> Summary</button>
@@ -670,7 +673,8 @@ export default function DashboardPage() {
           ))}
         </div>
 
-        {/* upload */}
+        {/* upload — editors only; other users are read-only */}
+        {editor && (
         <div onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)} onDrop={onDrop} onClick={() => fileRef.current?.click()}
           className={`cursor-pointer rounded-xl border-2 border-dashed p-6 text-center transition ${drag ? "border-sphere-pulse bg-sphere-warm-wash" : "border-neutral-300 bg-white hover:border-sphere-warm-light"}`}>
           <input ref={fileRef} type="file" multiple accept=".xml,.gz,.zip,.json" className="hidden" onChange={(e) => e.target.files?.length && void handleFiles([...e.target.files])} />
@@ -680,6 +684,7 @@ export default function DashboardPage() {
           {busy && <p className="mt-2 text-xs font-medium text-sphere-core">{busyNote ?? "Processing…"}</p>}
           {msg && !busy && <p className="mt-2 text-xs font-medium text-neutral-600">{msg}</p>}
         </div>
+        )}
 
         {/* summary panel */}
         {summaryText && (
@@ -966,7 +971,7 @@ export default function DashboardPage() {
                 ) : (
                   <p className="text-sm text-neutral-500">The sending sources for failing mail haven&apos;t been identified yet, so no country breakdown is available.</p>
                 )}
-                {unidentified > 0 && (
+                {unidentified > 0 && editor && (
                   <p className="mt-3 flex items-center gap-1.5 text-xs text-neutral-400">
                     <Globe size={12} /> {unidentified} sending source{unidentified !== 1 ? "s" : ""} still unidentified — use “Identify {unidentified} source{unidentified !== 1 ? "s" : ""}” in the explorer below to resolve countries.
                   </p>
@@ -984,11 +989,11 @@ export default function DashboardPage() {
                   </button>
                 ))}
                 <div className="ml-auto py-1">
-                  {unidentified > 0 ? (
+                  {unidentified > 0 && editor ? (
                     <button onClick={() => void enrich()} disabled={enriching} className="inline-flex items-center gap-1.5 rounded-lg bg-sphere-core px-3 py-1.5 text-xs font-medium text-white hover:bg-sphere-secondary disabled:opacity-60">
                       {enriching ? <><RefreshCw size={13} className="animate-spin" /> Identifying… {enrichPct}%</> : <><Globe size={13} /> Identify {unidentified} source{unidentified !== 1 ? "s" : ""}</>}
                     </button>
-                  ) : <span className="inline-flex items-center gap-1 pr-2 text-xs text-green-600"><CheckCircle2 size={12} /> Sources identified</span>}
+                  ) : unidentified === 0 ? <span className="inline-flex items-center gap-1 pr-2 text-xs text-green-600"><CheckCircle2 size={12} /> Sources identified</span> : null}
                 </div>
               </div>
 

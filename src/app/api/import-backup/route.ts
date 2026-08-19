@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getIdentity, IdentityError } from "@/lib/auth";
+import { isEditor } from "@/lib/rbac";
 import { backupSchema } from "@/lib/validation";
 import { db, ensureSchema } from "@/lib/db";
 import { writeAudit } from "@/lib/audit";
@@ -37,6 +38,7 @@ function normaliseRow(r: LegacyRow) {
 export async function POST(req: Request) {
   try {
     const user = await getIdentity();
+    if (!isEditor(user.email)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     const parsed = backupSchema.safeParse(await req.json());
     if (!parsed.success) return NextResponse.json({ error: "Invalid input" }, { status: 400 });

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getIdentity, IdentityError } from "@/lib/auth";
+import { isEditor } from "@/lib/rbac";
 import { uploadSchema } from "@/lib/validation";
 import { ensureSchema } from "@/lib/db";
 import { ingestReports } from "@/lib/reports";
@@ -9,6 +10,7 @@ import { log } from "@/lib/log";
 export async function POST(req: Request) {
   try {
     const user = await getIdentity();
+    if (!isEditor(user.email)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     const parsed = uploadSchema.safeParse(await req.json());
     if (!parsed.success) return NextResponse.json({ error: "Invalid input" }, { status: 400 });
     await ensureSchema();

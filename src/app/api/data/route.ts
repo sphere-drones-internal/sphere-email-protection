@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { getIdentity, IdentityError } from "@/lib/auth";
+import { isEditor } from "@/lib/rbac";
 import { db, ensureSchema } from "@/lib/db";
 import { MANUAL_IPINFO } from "@/lib/dmarc";
 import { log } from "@/lib/log";
 
 export async function GET() {
   try {
-    await getIdentity();
+    const user = await getIdentity();
     await ensureSchema();
     const [reports, rows, ipInfoRows] = await Promise.all([
       db.report.findMany({
@@ -28,6 +29,7 @@ export async function GET() {
     Object.assign(ipInfo, MANUAL_IPINFO); // manual overrides always win
     const reportMeta = Object.fromEntries(reports.map((r) => [r.id, { org: r.org, domain: r.domain, begin: r.begin.getTime(), end: r.end.getTime() }]));
     return NextResponse.json({
+      me: { email: user.email, editor: isEditor(user.email) },
       reports: reports.map((r) => ({ ...r, begin: r.begin.getTime(), end: r.end.getTime() })),
       rows: rows.map((r) => {
         const meta = reportMeta[r.reportId];

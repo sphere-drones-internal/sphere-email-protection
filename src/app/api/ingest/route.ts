@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getIdentity, IdentityError } from "@/lib/auth";
+import { isEditor } from "@/lib/rbac";
 import { runIngest } from "@/lib/ingest";
 import { log } from "@/lib/log";
 
@@ -8,6 +9,7 @@ import { log } from "@/lib/log";
 export async function POST() {
   try {
     const user = await getIdentity();
+    if (!isEditor(user.email)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     const result = await runIngest(user.email);
     if (!result) return NextResponse.json({ error: "Gmail ingestion is not configured" }, { status: 503 });
     return NextResponse.json(result);

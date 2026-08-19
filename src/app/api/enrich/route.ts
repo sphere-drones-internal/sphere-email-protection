@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getIdentity, IdentityError } from "@/lib/auth";
+import { isEditor } from "@/lib/rbac";
 import { enrichSchema } from "@/lib/validation";
 import { db, ensureSchema } from "@/lib/db";
 import { OVERRIDES } from "@/lib/ip-overrides";
@@ -44,6 +45,7 @@ async function lookupBatch(ips: string[]): Promise<Map<string, GeoResult>> {
 export async function POST(req: Request) {
   try {
     const user = await getIdentity();
+    if (!isEditor(user.email)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     const parsed = enrichSchema.safeParse(await req.json());
     if (!parsed.success) return NextResponse.json({ error: "Invalid input" }, { status: 400 });
     await ensureSchema();
