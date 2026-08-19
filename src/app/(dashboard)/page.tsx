@@ -266,7 +266,8 @@ export default function DashboardPage() {
         if (d.errors) parts.push(`${d.errors} failed to parse`);
         setMsg(parts.join(", ") + ".");
       } else if (res.status === 503) {
-        setMsg("Gmail ingestion isn't configured yet.");
+        const d = (await res.json().catch(() => ({}))) as { missing?: string[] };
+        setMsg(d.missing?.length ? `Gmail ingestion isn't configured — missing secrets: ${d.missing.join(", ")}.` : "Gmail ingestion isn't configured yet.");
       } else {
         setMsg(`Fetch failed (server responded ${res.status}).`);
       }

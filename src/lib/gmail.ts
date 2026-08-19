@@ -17,6 +17,13 @@ export type GmailConfig = {
   labelId: string;
 };
 
+// Names of the required Gmail env vars that are absent/empty in the running
+// process — surfaced to the operator (names only, never values) so a misconfigured
+// deploy is diagnosable without guessing.
+export function missingGmailVars(): string[] {
+  return (["GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"] as const).filter((k) => !process.env[k]);
+}
+
 export function gmailConfigFromEnv(): GmailConfig | null {
   const { GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN } = process.env;
   if (!GMAIL_CLIENT_ID || !GMAIL_CLIENT_SECRET || !GMAIL_REFRESH_TOKEN) return null;
