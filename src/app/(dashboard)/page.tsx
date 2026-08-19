@@ -181,6 +181,7 @@ export default function DashboardPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [busyNote, setBusyNote] = useState<string | null>(null);
   const [drag, setDrag] = useState(false);
   const [enriching, setEnriching] = useState(false);
   const [enrichPct, setEnrichPct] = useState(0);
@@ -274,38 +275,58 @@ export default function DashboardPage() {
   }, [refreshData]);
 
   // ---------- upload ----------
+  // Reports are posted in size-bounded batches, not one request — a large drop
+  // (hundreds of files) otherwise serialises into a single multi-MB POST that the
+  // server/proxy rejects. Batches keep each request small and give live progress.
+  const MAX_BATCH_BYTES = 3_000_000; // ~3 MB per POST, well under any gateway limit
   const handleFiles = useCallback(async (files: File[]) => {
-    setBusy(true); setMsg(null);
-    let backupImported = 0, errored = 0;
+    setBusy(true); setMsg(null); setBusyNote(null);
+    let backupImported = 0, fileErrors = 0;
     const parsedReports: ParsedReport[] = [];
+
+    // Parse locally first (XML → reports). JSON backups still post one-per-file.
     for (const file of files) {
       if (/\.json$/i.test(file.name)) {
         try {
           const res = await fetch("/api/import-backup", { method: "POST", headers: { "Content-Type": "application/json" }, body: await file.text() });
           if (res.ok) { const d = (await res.json()) as { added: number }; backupImported += d.added; }
-          else errored++;
-        } catch { errored++; }
+          else fileErrors++;
+        } catch { fileErrors++; }
         continue;
       }
       try {
         for (const xml of await extractXml(file)) parsedReports.push(parseReport(xml));
-      } catch { errored++; }
+      } catch { fileErrors++; }
     }
-    let added = 0, skipped = 0;
-    if (parsedReports.length) {
+
+    // Greedily pack reports into ≤3 MB batches (robust to varying report sizes).
+    const batches: ParsedReport[][] = [];
+    let batch: ParsedReport[] = [], batchBytes = 0;
+    for (const r of parsedReports) {
+      const size = JSON.stringify(r).length;
+      if (batch.length && batchBytes + size > MAX_BATCH_BYTES) { batches.push(batch); batch = []; batchBytes = 0; }
+      batch.push(r); batchBytes += size;
+    }
+    if (batch.length) batches.push(batch);
+
+    let added = 0, skipped = 0, reportErrors = 0;
+    for (let i = 0; i < batches.length; i++) {
+      if (batches.length > 1) setBusyNote(`Uploading ${i + 1} of ${batches.length} batches…`);
       try {
-        const res = await fetch("/api/reports", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reports: parsedReports }) });
-        if (res.ok) { const d = (await res.json()) as { added: number; skipped: number }; added = d.added; skipped = d.skipped; }
-        else errored++;
-      } catch { errored++; }
+        const res = await fetch("/api/reports", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reports: batches[i] }) });
+        if (res.ok) { const d = (await res.json()) as { added: number; skipped: number }; added += d.added; skipped += d.skipped; }
+        else reportErrors += batches[i].length;
+      } catch { reportErrors += batches[i].length; }
     }
+
     await refreshData();
-    setBusy(false);
+    setBusy(false); setBusyNote(null);
     const parts: string[] = [];
     if (added) parts.push(`imported ${added} report${added !== 1 ? "s" : ""}`);
     if (backupImported) parts.push(`restored ${backupImported} from backup`);
     if (skipped) parts.push(`skipped ${skipped} duplicate${skipped !== 1 ? "s" : ""} already in the dataset`);
-    if (errored) parts.push(`${errored} file${errored !== 1 ? "s" : ""} failed`);
+    if (fileErrors) parts.push(`${fileErrors} file${fileErrors !== 1 ? "s" : ""} couldn’t be read`);
+    if (reportErrors) parts.push(`${reportErrors} report${reportErrors !== 1 ? "s" : ""} failed to save`);
     setMsg(parts.length ? parts.join(", ").replace(/^./, (c) => c.toUpperCase()) + "." : "Nothing new to import — already in the dataset.");
   }, [refreshData]);
 
@@ -623,7 +644,7 @@ export default function DashboardPage() {
           <Upload className="mx-auto mb-2 text-neutral-400" size={28} />
           <p className="text-sm font-medium text-neutral-700">Drop DMARC aggregate reports here, or click to browse</p>
           <p className="mt-1 text-xs text-neutral-400">.xml, .xml.gz, .zip — or a .json backup from the Claude artifact. Duplicates ignored by report ID.</p>
-          {busy && <p className="mt-2 text-xs font-medium text-sphere-core">Processing…</p>}
+          {busy && <p className="mt-2 text-xs font-medium text-sphere-core">{busyNote ?? "Processing…"}</p>}
           {msg && !busy && <p className="mt-2 text-xs font-medium text-neutral-600">{msg}</p>}
         </div>
 
