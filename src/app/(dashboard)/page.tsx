@@ -47,11 +47,12 @@ type DnsAction = { domain: string; records: { host: string; type: string; value?
 
 type DnsApiResult = {
   domain: string;
-  dmarc: { present: false } | { present: true; raw: string; p: string | null; sp: string | null; pct: number; rua: string | null };
-  spf: string | null;
+  // present:false = genuine absence; unknown:true = the lookup couldn't complete.
+  dmarc: { present: false; unknown?: boolean } | { present: true; raw: string; p: string | null; sp: string | null; pct: number; rua: string | null };
+  spf: string | null; // "" = absent, null = couldn't check
   spfLookups: number | null;
-  bimi: string | null;
-  dkim: string[];
+  bimi: string | null; // "" = absent, null = couldn't check
+  dkim: string[] | null; // null = couldn't check
   dkimChecked: number;
   checkedAt: string;
 };
@@ -210,7 +211,18 @@ export default function DashboardPage() {
       const map: Record<string, PublishedRecord> = {};
       for (const r of d.results) {
         // "" = confirmed absent by the live lookup (vs null = never checked)
-        map[r.domain] = { recorded: r.checkedAt, dmarc: r.dmarc.present ? r.dmarc.raw : "", bimi: r.bimi ?? "", spf: r.spf ?? "", spfLookups: r.spfLookups, dkim: r.dkim, dkimChecked: r.dkimChecked };
+        // Preserve the three states: present (string), absent (""), couldn't-check
+        // (null / undefined → shown as "not recorded" / "not checked"). Don't coerce
+        // a failed lookup into a false "none".
+        map[r.domain] = {
+          recorded: r.checkedAt,
+          dmarc: r.dmarc.present ? r.dmarc.raw : r.dmarc.unknown ? null : "",
+          bimi: r.bimi,
+          spf: r.spf,
+          spfLookups: r.spfLookups,
+          dkim: r.dkim ?? undefined,
+          dkimChecked: r.dkimChecked,
+        };
       }
       setLiveDns(map);
       setDnsChecked(d.results[0]?.checkedAt ?? new Date().toISOString());

@@ -13,15 +13,56 @@ const DOMAINS = [
   "parisradio.com.au",
 ];
 
-const resolver = new Resolver();
+// timeout + tries give c-ares its own retry across both servers before failing.
+const resolver = new Resolver({ timeout: 5000, tries: 2 });
 resolver.setServers(["1.1.1.1", "8.8.8.8"]); // public resolvers, not corp DNS — see the live records the world sees
 
-async function txt(name: string): Promise<string[]> {
+// A single DNS check fans out to ~90 TXT lookups (5 domains × DMARC/SPF/BIMI +
+// dozens of DKIM selectors). Firing them all at once overwhelmed egress and made
+// lookups time out — which then looked like "no record" and produced wrong
+// results that flip between loads. Cap concurrency so every query gets a fair shot.
+const MAX_CONCURRENT = 8;
+let active = 0;
+const waiters: (() => void)[] = [];
+async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (active >= MAX_CONCURRENT) await new Promise<void>((resolve) => waiters.push(resolve));
+  active++;
   try {
-    const records = await resolver.resolveTxt(name);
-    return records.map((chunks) => chunks.join(""));
+    return await fn();
+  } finally {
+    active--;
+    waiters.shift()?.();
+  }
+}
+
+// A genuine "no such record" (NXDOMAIN / no TXT) returns []. A transient failure
+// (timeout / SERVFAIL / network) is retried a few times; only if every attempt
+// fails is it reported by throwing, so the caller can tell "absent" from
+// "couldn't check" rather than silently rendering a failure as "no record".
+async function txt(name: string): Promise<string[]> {
+  return withSlot(async () => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const records = await resolver.resolveTxt(name);
+        return records.map((chunks) => chunks.join(""));
+      } catch (e) {
+        const code = (e as { code?: string }).code;
+        if (code === "ENOTFOUND" || code === "ENODATA") return []; // genuinely no record
+        if (attempt >= 2) throw e; // exhausted retries on a transient error
+        await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+      }
+    }
+  });
+}
+
+// Best-effort variant for a single record type: a lookup failure must not abort
+// the whole domain's check, but we don't want to claim "absent" either — callers
+// that can tolerate uncertainty use this and treat a null as "unknown".
+async function txtSafe(name: string): Promise<string[] | null> {
+  try {
+    return await txt(name);
   } catch {
-    return []; // NXDOMAIN / no TXT = empty, not an error
+    return null;
   }
 }
 
@@ -53,7 +94,7 @@ async function spfLookupCount(record: string): Promise<number> {
     for (const target of targets) {
       if (count >= SPF_COUNT_CAP || seen.has(target) || seen.size >= SPF_COUNT_CAP) continue;
       seen.add(target);
-      const sub = (await txt(target)).find((r) => r.toLowerCase().startsWith("v=spf1"));
+      const sub = (await txtSafe(target) ?? []).find((r) => r.toLowerCase().startsWith("v=spf1"));
       if (sub) await walk(sub);
     }
   };
@@ -65,34 +106,42 @@ async function spfLookupCount(record: string): Promise<number> {
 // Probe the selectors major providers use, plus any observed in report data.
 const COMMON_DKIM_SELECTORS = ["google", "selector1", "selector2", "k1", "s1", "s2", "default", "mail"];
 
-async function dkimSelectors(domain: string, observed: string[]): Promise<{ found: string[]; checked: number }> {
+// found: selectors with a published key. null = couldn't check (every probe
+// failed) → the UI shows "not checked" rather than a misleading "none found".
+async function dkimSelectors(domain: string, observed: string[]): Promise<{ found: string[] | null; checked: number }> {
   const names = [...new Set([...COMMON_DKIM_SELECTORS, ...observed])];
   const results = await Promise.all(
     names.map(async (sel) => {
-      const records = await txt(`${sel}._domainkey.${domain}`);
-      return /v=dkim1|p=/i.test(records.join(" ")) ? sel : null;
+      const records = await txtSafe(`${sel}._domainkey.${domain}`);
+      if (records === null) return { sel, checked: false, hit: false };
+      return { sel, checked: true, hit: /v=dkim1|p=/i.test(records.join(" ")) };
     })
   );
-  return { found: results.filter((s): s is string => s !== null).sort(), checked: names.length };
+  if (!results.some((r) => r.checked)) return { found: null, checked: names.length };
+  return { found: results.filter((r) => r.checked && r.hit).map((r) => r.sel).sort(), checked: names.length };
 }
 
+// Per-record states: a present record (string / parsed), "" or present:false for
+// a genuine absence, and null / unknown for a lookup that couldn't complete — so
+// transient DNS failures never masquerade as "no record".
 async function runChecks(observedSelectors: Record<string, string[]>) {
   return Promise.all(
     DOMAINS.map(async (domain) => {
       const [dmarcTxt, rootTxt, bimiTxt, dkim] = await Promise.all([
-        txt(`_dmarc.${domain}`),
-        txt(domain),
-        txt(`default._bimi.${domain}`),
+        txtSafe(`_dmarc.${domain}`),
+        txtSafe(domain),
+        txtSafe(`default._bimi.${domain}`),
         dkimSelectors(domain, observedSelectors[domain] ?? []),
       ]);
-      const spf = rootTxt.find((r) => r.toLowerCase().startsWith("v=spf1")) ?? null;
+      const dmarc = dmarcTxt === null ? { present: false as const, unknown: true as const } : parseDmarc(dmarcTxt);
+      const spf = rootTxt === null ? null : (rootTxt.find((r) => r.toLowerCase().startsWith("v=spf1")) ?? "");
       return {
         domain,
-        dmarc: parseDmarc(dmarcTxt),
-        spf,
+        dmarc,
+        spf, // string = present, "" = absent, null = couldn't check
         spfLookups: spf ? await spfLookupCount(spf) : null,
-        bimi: bimiTxt.find((r) => r.toLowerCase().startsWith("v=bimi1")) ?? null,
-        dkim: dkim.found,
+        bimi: bimiTxt === null ? null : (bimiTxt.find((r) => r.toLowerCase().startsWith("v=bimi1")) ?? ""),
+        dkim: dkim.found, // string[] = found, null = couldn't check
         dkimChecked: dkim.checked,
         checkedAt: new Date().toISOString(),
       };
