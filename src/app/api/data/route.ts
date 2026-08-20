@@ -5,15 +5,27 @@ import { db, ensureSchema } from "@/lib/db";
 import { MANUAL_IPINFO } from "@/lib/dmarc";
 import { log } from "@/lib/log";
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
     const user = await getIdentity();
     await ensureSchema();
-    const [reports, rows, ipInfoRows] = await Promise.all([
-      db.report.findMany({
-        select: { id: true, org: true, domain: true, begin: true, end: true, policyP: true, policySp: true, policyPct: true },
-      }),
+
+    // Default to a recent window so the payload stays small and fast; `days=all`
+    // loads the full history on demand. The whole dataset grows ~5k rows/day, so
+    // returning every row on every load doesn't scale.
+    const daysParam = new URL(req.url).searchParams.get("days");
+    const days = daysParam === "all" ? null : Math.min(Math.max(parseInt(daysParam ?? "90") || 90, 1), 3650);
+    const cutoff = days === null ? null : new Date(Date.now() - days * 86_400_000);
+
+    // Fetch the in-window reports first, then only their rows (the big table).
+    const reports = await db.report.findMany({
+      where: cutoff ? { begin: { gte: cutoff } } : undefined,
+      select: { id: true, org: true, domain: true, begin: true, end: true, policyP: true, policySp: true, policyPct: true },
+    });
+    const reportIds = reports.map((r) => r.id);
+    const [rows, ipInfoRows] = await Promise.all([
       db.reportRow.findMany({
+        where: { reportId: { in: reportIds } },
         select: {
           reportId: true, sourceIp: true, count: true, disposition: true,
           peDkim: true, peSpf: true, headerFrom: true,
@@ -30,6 +42,7 @@ export async function GET() {
     const reportMeta = Object.fromEntries(reports.map((r) => [r.id, { org: r.org, domain: r.domain, begin: r.begin.getTime(), end: r.end.getTime() }]));
     return NextResponse.json({
       me: { email: user.email, editor: isEditor(user.email) },
+      window: { days }, // null = full history
       reports: reports.map((r) => ({ ...r, begin: r.begin.getTime(), end: r.end.getTime() })),
       rows: rows.map((r) => {
         const meta = reportMeta[r.reportId];

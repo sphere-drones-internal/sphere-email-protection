@@ -182,6 +182,7 @@ export default function DashboardPage() {
   const [loaded, setLoaded] = useState(false);
   const [stale, setStale] = useState(false); // showing cached data while a fresh fetch runs
   const [editor, setEditor] = useState(false); // write access (upload/fetch/enrich); others are read-only
+  const [windowDays, setWindowDays] = useState<number | "all">(90); // default to a recent window for fast loads
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -238,14 +239,14 @@ export default function DashboardPage() {
     setRefreshing(true);
     let freshRows: ApiRow[] = [];
     try {
-      const res = await fetch("/api/data");
+      const res = await fetch(`/api/data?days=${windowDays}`);
       if (res.ok) {
         const d = (await res.json()) as { rows: ApiRow[]; reports: ApiReport[]; ipInfo: Record<string, IpMeta>; me?: { email: string; editor: boolean } };
         freshRows = d.rows;
         setRows(d.rows); setReports(d.reports); setIpInfo({ ...d.ipInfo, ...MANUAL_IPINFO });
         setEditor(!!d.me?.editor);
         setLoadError(null); setStale(false);
-        void cacheSet("data", d);
+        void cacheSet(`data:${windowDays}`, d);
       } else {
         // Any error (500, or a dev cold-compile 404) must not masquerade as "no
         // data" — surface it so the empty state isn't misread as an empty dataset.
@@ -268,13 +269,13 @@ export default function DashboardPage() {
     for (const d of Object.keys(observed)) observed[d] = observed[d].slice(0, 20);
     await refreshDns(observed);
     setRefreshing(false);
-  }, [refreshDns]);
+  }, [refreshDns, windowDays]);
   useEffect(() => {
     void (async () => {
       // Paint the last-known data from cache immediately so the page isn't blank
       // while the large fresh payload loads; then refresh in the background.
       const [cachedData, cachedDns] = await Promise.all([
-        cacheGet<{ rows: ApiRow[]; reports: ApiReport[]; ipInfo: Record<string, IpMeta>; me?: { email: string; editor: boolean } }>("data"),
+        cacheGet<{ rows: ApiRow[]; reports: ApiReport[]; ipInfo: Record<string, IpMeta>; me?: { email: string; editor: boolean } }>(`data:${windowDays}`),
         cacheGet<{ map: Record<string, PublishedRecord>; checked: string }>("dns"),
       ]);
       if (cachedData) {
@@ -286,7 +287,7 @@ export default function DashboardPage() {
       await refreshData();
       setLoaded(true);
     })();
-  }, [refreshData]);
+  }, [refreshData, windowDays]);
 
   // ---------- fetch from Gmail (manual trigger; the hourly run is server-side) ----------
   const fetchMail = useCallback(async () => {
@@ -646,6 +647,13 @@ export default function DashboardPage() {
             <div>
               <h1 className="font-heading text-xl font-medium text-sphere-dark">Email Authentication Dashboard</h1>
               <p className="text-sm text-neutral-500">DMARC, SPF &amp; BIMI monitoring{hasData ? ` · ${m.range}` : ""}{stale && refreshing ? " · showing cached data, updating…" : ""}</p>
+              <button
+                onClick={() => setWindowDays((w) => (w === "all" ? 90 : "all"))}
+                disabled={refreshing}
+                className="mt-0.5 text-xs text-neutral-400 underline-offset-2 hover:text-sphere-secondary hover:underline disabled:opacity-60"
+              >
+                {windowDays === "all" ? "Showing full history — switch to last 90 days" : "Showing last 90 days — load full history"}
+              </button>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">

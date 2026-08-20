@@ -17,7 +17,7 @@ const postReq = (url: string) => new Request(url, { method: "POST" });
 
 describe("API routes fail closed without a forwarded identity", () => {
   it("GET /api/data → 401", async () => {
-    expect((await dataGet()).status).toBe(401);
+    expect((await dataGet(new Request("http://localhost/api/data"))).status).toBe(401);
   });
 
   it("GET /api/dns → 401", async () => {
