@@ -14,7 +14,7 @@ export async function GET(req: Request) {
     // loads the full history on demand. The whole dataset grows ~5k rows/day, so
     // returning every row on every load doesn't scale.
     const daysParam = new URL(req.url).searchParams.get("days");
-    const days = daysParam === "all" ? null : Math.min(Math.max(parseInt(daysParam ?? "90") || 90, 1), 3650);
+    const days = daysParam === "all" ? null : Math.min(Math.max(parseInt(daysParam ?? "30") || 30, 1), 3650);
     const cutoff = days === null ? null : new Date(Date.now() - days * 86_400_000);
 
     // Fetch the in-window reports first, then only their rows (the big table).

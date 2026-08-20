@@ -182,7 +182,7 @@ export default function DashboardPage() {
   const [loaded, setLoaded] = useState(false);
   const [stale, setStale] = useState(false); // showing cached data while a fresh fetch runs
   const [editor, setEditor] = useState(false); // write access (upload/fetch/enrich); others are read-only
-  const [windowDays, setWindowDays] = useState<number | "all">(90); // default to a recent window for fast loads
+  const [windowDays, setWindowDays] = useState<number | "all">(30); // default to a recent window for fast loads
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -648,11 +648,11 @@ export default function DashboardPage() {
               <h1 className="font-heading text-xl font-medium text-sphere-dark">Email Authentication Dashboard</h1>
               <p className="text-sm text-neutral-500">DMARC, SPF &amp; BIMI monitoring{hasData ? ` · ${m.range}` : ""}{stale && refreshing ? " · showing cached data, updating…" : ""}</p>
               <button
-                onClick={() => setWindowDays((w) => (w === "all" ? 90 : "all"))}
+                onClick={() => setWindowDays((w) => (w === "all" ? 30 : "all"))}
                 disabled={refreshing}
                 className="mt-0.5 text-xs text-neutral-400 underline-offset-2 hover:text-sphere-secondary hover:underline disabled:opacity-60"
               >
-                {windowDays === "all" ? "Showing full history — switch to last 90 days" : "Showing last 90 days — load full history"}
+                {windowDays === "all" ? "Showing full history — switch to last 30 days" : "Showing last 30 days — load full history"}
               </button>
             </div>
           </div>
