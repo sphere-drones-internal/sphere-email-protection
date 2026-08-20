@@ -175,6 +175,19 @@ function Delta({ now, prev, invert = false, suffix = "" }: { now: number; prev: 
 }
 
 // ---------- page ----------
+// Selectable dashboard time ranges. Narrower = faster load; the whole dataset
+// grows ~5k rows/day, so "All history" is the heavy option.
+const RANGES: { label: string; value: number | "all" }[] = [
+  { label: "1 day", value: 1 },
+  { label: "3 days", value: 3 },
+  { label: "7 days", value: 7 },
+  { label: "30 days", value: 30 },
+  { label: "2 months", value: 60 },
+  { label: "3 months", value: 90 },
+  { label: "6 months", value: 180 },
+  { label: "All history", value: "all" },
+];
+
 export default function DashboardPage() {
   const [rows, setRows] = useState<ApiRow[]>([]);
   const [reports, setReports] = useState<ApiReport[]>([]);
@@ -647,13 +660,19 @@ export default function DashboardPage() {
             <div>
               <h1 className="font-heading text-xl font-medium text-sphere-dark">Email Authentication Dashboard</h1>
               <p className="text-sm text-neutral-500">DMARC, SPF &amp; BIMI monitoring{hasData ? ` · ${m.range}` : ""}{stale && refreshing ? " · showing cached data, updating…" : ""}</p>
-              <button
-                onClick={() => setWindowDays((w) => (w === "all" ? 30 : "all"))}
-                disabled={refreshing}
-                className="mt-0.5 text-xs text-neutral-400 underline-offset-2 hover:text-sphere-secondary hover:underline disabled:opacity-60"
-              >
-                {windowDays === "all" ? "Showing full history — switch to last 30 days" : "Showing last 30 days — load full history"}
-              </button>
+              <label className="mt-1 flex items-center gap-1.5 text-xs text-neutral-500">
+                <span>Range</span>
+                <select
+                  value={windowDays === "all" ? "all" : String(windowDays)}
+                  onChange={(e) => setWindowDays(e.target.value === "all" ? "all" : Number(e.target.value))}
+                  disabled={refreshing}
+                  className="rounded-lg border border-neutral-200 bg-white px-2 py-1 text-xs text-neutral-700 hover:bg-neutral-50 disabled:opacity-60"
+                >
+                  {RANGES.map((r) => (
+                    <option key={r.label} value={r.value === "all" ? "all" : String(r.value)}>{r.label}</option>
+                  ))}
+                </select>
+              </label>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
