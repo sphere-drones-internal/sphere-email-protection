@@ -8,6 +8,7 @@ import { z } from "zod";
 const schema = z.object({
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required (platform-injected Postgres connection string)"),
   IPINFO_TOKEN: z.string().optional(),
+  EDITOR_EMAILS: z.string().min(1, "EDITOR_EMAILS is required (comma-separated emails allowed to write data)"),
 });
 
 export type Env = z.infer<typeof schema>;

@@ -4,16 +4,16 @@ import { isEditor } from "@/lib/rbac";
 afterEach(() => vi.unstubAllEnvs());
 
 describe("isEditor", () => {
-  it("defaults to the owner and is case-insensitive", () => {
-    expect(isEditor("josh@spheregroup.com.au")).toBe(true);
-    expect(isEditor("JOSH@SphereGroup.com.au")).toBe(true);
-    expect(isEditor("someone.else@spheregroup.com.au")).toBe(false);
+  it("fails closed when EDITOR_EMAILS is unset — nobody is an editor", () => {
+    vi.stubEnv("EDITOR_EMAILS", "");
+    expect(isEditor("josh@spheregroup.com.au")).toBe(false);
+    expect(isEditor("anyone@spheregroup.com.au")).toBe(false);
   });
 
-  it("honours the EDITOR_EMAILS allowlist (comma-separated)", () => {
+  it("honours the EDITOR_EMAILS allowlist (comma-separated) and is case-insensitive", () => {
     vi.stubEnv("EDITOR_EMAILS", "a@x.com, b@y.com");
     expect(isEditor("a@x.com")).toBe(true);
-    expect(isEditor("b@y.com")).toBe(true);
-    expect(isEditor("josh@spheregroup.com.au")).toBe(false); // default is replaced, not merged
+    expect(isEditor("B@Y.com")).toBe(true);
+    expect(isEditor("josh@spheregroup.com.au")).toBe(false); // not on the allowlist
   });
 });

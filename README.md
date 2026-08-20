@@ -38,13 +38,15 @@ The platform owns **auth, TLS, and the network** — this app does **not**:
   injected. The DB is handed over **empty** — `ensureSchema()` in `src/lib/db.ts`
   creates the tables on first boot (idempotent; a no-op once they exist).
 - Required config is validated at boot (`src/lib/env.ts` via `src/instrumentation.ts`)
-  and the process fails fast if `DATABASE_URL` is missing — no dev fallback.
+  and the process fails fast if a required var (`DATABASE_URL`, `EDITOR_EMAILS`) is
+  missing — no dev fallback and no hardcoded editor.
 
 ### Environment variables (Coolify runtime secrets)
 
 | Var | Required | Purpose |
 |-----|----------|---------|
 | `DATABASE_URL` | yes | Platform-injected Postgres connection string |
+| `EDITOR_EMAILS` | yes | Comma-separated allowlist of emails granted write access (upload/fetch/import/enrich). Fails closed — everyone else is read-only, and no email is baked into the image |
 | `IPINFO_TOKEN` | recommended | ipinfo.io token for geo enrichment; enrichment self-heals once set |
 | `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` / `GMAIL_REFRESH_TOKEN` | optional | Enable auto report ingestion; auto-fetch stays off until all three are set |
 | `GMAIL_LABEL_ID` | optional | Gmail label to read (default: the mailbox's "DMARC Reports" label) |
@@ -83,8 +85,9 @@ npm install
 npm run dev            # http://localhost:3000
 ```
 
-Needs a local `.env` with `DATABASE_URL` (any reachable Postgres) and optionally
-`IPINFO_TOKEN`. `.env` is git-ignored and never shipped in the image.
+Needs a local `.env` with `DATABASE_URL` (any reachable Postgres) and `EDITOR_EMAILS`
+(comma-separated emails allowed to write), and optionally `IPINFO_TOKEN`. `.env` is
+git-ignored and never shipped in the image.
 
 ## Checks
 

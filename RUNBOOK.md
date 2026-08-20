@@ -8,6 +8,11 @@ Operational reference. Governance tier **T2** (see `sphere-app.json`).
 - Stateless; all state in the platform Postgres (per-app DB, injected `DATABASE_URL`).
 - Probes: `/healthz` (liveness, no deps) and `/readyz` (Postgres reachable → 503 until so).
 - Egress: `ipinfo.io` (HTTPS) and public DNS `1.1.1.1` / `8.8.8.8` — must be allowed on the tailnet.
+- Write access (upload/fetch/import/enrich) is gated by `EDITOR_EMAILS` (comma-separated
+  allowlist, runtime secret). It is **required** and **fails closed**: if unset the app
+  won't boot (env validation), and no email is baked into the image. Everyone authenticated
+  by Authentik who is *not* on the list is read-only. `GMAIL_LABEL_ID` is an optional
+  runtime override for the mailbox label (defaults to the "DMARC Reports" label).
 
 ## Deploy / rollback
 

@@ -3,7 +3,7 @@ import { Bai_Jamjuree, Hanken_Grotesk } from "next/font/google";
 import "./globals.css";
 
 // next/font self-hosts these at build time (served from our own origin), so the
-// strict CSP in src/middleware.ts doesn't need a font-src exception for a Google CDN.
+// strict CSP in src/proxy.ts doesn't need a font-src exception for a Google CDN.
 const baiJamjuree = Bai_Jamjuree({
   subsets: ["latin"],
   weight: ["300", "500"],
@@ -21,7 +21,7 @@ export const metadata: Metadata = {
   description: "Email authentication (DMARC, SPF & BIMI) monitoring dashboard for Sphere",
 };
 
-// Every route here is processed by src/middleware.ts and gets a fresh CSP nonce
+// Every route here is processed by src/proxy.ts and gets a fresh CSP nonce
 // per request, so static optimization has no benefit — force dynamic rendering
 // so the nonce is actually attached to Next's inline scripts. (Session checks are
 // enforced upstream by the platform's Authentik forward-auth, not in-app.)

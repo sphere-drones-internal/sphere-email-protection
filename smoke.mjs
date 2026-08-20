@@ -22,8 +22,13 @@ if (!DATABASE_URL) {
   process.exit(1);
 }
 
+// EDITOR_EMAILS is a required runtime secret (write-access allowlist); provide one
+// so the standalone server boots past env validation. The smoke assertions below
+// only exercise read/fail-closed paths, so any value works here.
+const EDITOR_EMAILS = process.env.EDITOR_EMAILS || "smoke@spheregroup.com.au";
+
 const server = spawn("node", [".next/standalone/server.js"], {
-  env: { ...process.env, PORT, HOSTNAME: "127.0.0.1", DATABASE_URL, NODE_ENV: "production" },
+  env: { ...process.env, PORT, HOSTNAME: "127.0.0.1", DATABASE_URL, EDITOR_EMAILS, NODE_ENV: "production" },
   stdio: "inherit",
 });
 
