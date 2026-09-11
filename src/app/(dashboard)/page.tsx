@@ -10,7 +10,7 @@
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
-import { Upload, CheckCircle2, AlertTriangle, Globe, FileText, Download, RefreshCw, Sparkles, ChevronRight, ChevronDown, ExternalLink, TrendingUp, TrendingDown, Minus, Wrench, ClipboardList, FileDown, Mail } from "lucide-react";
+import { Upload, CheckCircle2, AlertTriangle, Globe, FileText, Download, RefreshCw, Sparkles, ChevronRight, ChevronDown, ExternalLink, TrendingUp, TrendingDown, Minus, Wrench, ClipboardList, FileDown, Mail, Check } from "lucide-react";
 import "flag-icons/css/flag-icons.min.css";
 import { classifyRow, fixHint, MANUAL_IPINFO, type TrimmedRow, type ParsedReport } from "@/lib/dmarc";
 import { buildOverview } from "@/lib/summary";
@@ -208,13 +208,32 @@ export default function DashboardPage() {
   const [tab, setTab] = useState<TabKey>("compliant");
   const [openSrc, setOpenSrc] = useState<Record<string, boolean>>({});
   const [closedDoms, setClosedDoms] = useState<Record<string, boolean>>({});
-  const [domain, setDomain] = useState<string>("all");
+  // Multi-select domain filter. Empty = all domains (the default). A derived
+  // `domain` (below) keeps the single-domain views — published records, mxtoolbox
+  // links, CSV name — working: they light up only when exactly one is selected.
+  const [selectedDomains, setSelectedDomains] = useState<string[]>([]);
+  const [domainMenuOpen, setDomainMenuOpen] = useState(false);
+  const domainMenuRef = useRef<HTMLDivElement>(null);
   const [showDns, setShowDns] = useState(false);
   const [summaryText, setSummaryText] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [liveDns, setLiveDns] = useState<Record<string, PublishedRecord> | null>(null);
   const [dnsChecked, setDnsChecked] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const allDomainsSelected = selectedDomains.length === 0;
+  // Single-domain views need one concrete domain; with 0 or 2+ selected they fall
+  // back to the "all" behaviour (portfolio list / unfiltered name).
+  const domain = selectedDomains.length === 1 ? selectedDomains[0] : "all";
+  const toggleDomain = (d: string) => setSelectedDomains((prev) => (prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]));
+
+  // Close the domain menu on an outside click.
+  useEffect(() => {
+    if (!domainMenuOpen) return;
+    const onDown = (e: MouseEvent) => { if (domainMenuRef.current && !domainMenuRef.current.contains(e.target as Node)) setDomainMenuOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [domainMenuOpen]);
 
   const refreshDns = useCallback(async (observedSelectors: Record<string, string[]>) => {
     try {
@@ -389,7 +408,7 @@ export default function DashboardPage() {
     return v;
   }, [rows]);
   const domainList = useMemo(() => [...PORTFOLIO, ...Object.keys(domainVolumes).filter((d) => !PORTFOLIO.includes(d) && d !== "—")], [domainVolumes]);
-  const view = useMemo(() => (domain === "all" ? rows : rows.filter((r) => domainOf(r) === domain)), [rows, domain]);
+  const view = useMemo(() => (allDomainsSelected ? rows : rows.filter((r) => selectedDomains.includes(domainOf(r)))), [rows, selectedDomains, allDomainsSelected]);
 
   // ---------- metrics ----------
   const m = useMemo(() => {
@@ -646,7 +665,6 @@ export default function DashboardPage() {
   const hasData = view.length > 0;
   const domains = explorer.domains[tab];
   const fmt = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${n}`);
-  const pill = (active: boolean) => `rounded-lg border px-3 py-1.5 text-sm transition ${active ? "border-sphere-core bg-sphere-core text-white" : "border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-100"}`;
   const recordAge = (rec: PublishedRecord | undefined) => (rec?.recorded ? Math.floor((Date.now() - new Date(rec.recorded).getTime()) / 86400000) : null);
 
   return (
@@ -660,19 +678,6 @@ export default function DashboardPage() {
             <div>
               <h1 className="font-heading text-xl font-medium text-sphere-dark">Email Authentication Dashboard</h1>
               <p className="text-sm text-neutral-500">DMARC, SPF &amp; BIMI monitoring{hasData ? ` · ${m.range}` : ""}{stale && refreshing ? " · showing cached data, updating…" : ""}</p>
-              <label className="mt-1 flex items-center gap-1.5 text-xs text-neutral-500">
-                <span>Range</span>
-                <select
-                  value={windowDays === "all" ? "all" : String(windowDays)}
-                  onChange={(e) => setWindowDays(e.target.value === "all" ? "all" : Number(e.target.value))}
-                  disabled={refreshing}
-                  className="rounded-lg border border-neutral-200 bg-white px-2 py-1 text-xs text-neutral-700 hover:bg-neutral-50 disabled:opacity-60"
-                >
-                  {RANGES.map((r) => (
-                    <option key={r.label} value={r.value === "all" ? "all" : String(r.value)}>{r.label}</option>
-                  ))}
-                </select>
-              </label>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -686,18 +691,63 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* domain switcher */}
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs font-semibold uppercase tracking-wide text-neutral-400">Domain</span>
-          <button onClick={() => setDomain("all")} className={pill(domain === "all")}>All domains</button>
-          {domainList.map((d) => (
-            <button key={d} onClick={() => setDomain(d)} className={pill(domain === d)}>
-              {d}
-              {domainVolumes[d]
-                ? <span className={`ml-1.5 rounded px-1.5 py-0.5 text-[10px] font-semibold ${domain === d ? "bg-white/20" : "bg-neutral-100 text-neutral-500"}`}>{fmt(domainVolumes[d])}</span>
-                : <span className={`ml-1.5 text-[10px] ${domain === d ? "text-white/70" : "text-neutral-300"}`}>no data</span>}
-            </button>
-          ))}
+        {/* filters: domain multi-select + time range, inline */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-neutral-400">Domain</span>
+            <div className="relative" ref={domainMenuRef}>
+              <button
+                onClick={() => setDomainMenuOpen((o) => !o)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-700 hover:bg-neutral-100"
+              >
+                {allDomainsSelected ? "All domains" : selectedDomains.length === 1 ? selectedDomains[0] : `${selectedDomains.length} domains`}
+                <ChevronDown size={14} className={`text-neutral-400 transition ${domainMenuOpen ? "rotate-180" : ""}`} />
+              </button>
+              {domainMenuOpen && (
+                <div className="absolute left-0 z-20 mt-1 max-h-80 w-72 overflow-auto rounded-xl border border-neutral-200 bg-white p-1 shadow-lg">
+                  <button
+                    onClick={() => setSelectedDomains([])}
+                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm text-neutral-700 hover:bg-neutral-50"
+                  >
+                    <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${allDomainsSelected ? "border-sphere-core bg-sphere-core text-white" : "border-neutral-300"}`}>{allDomainsSelected && <Check size={11} strokeWidth={3} />}</span>
+                    <span className="font-medium">All domains</span>
+                  </button>
+                  <div className="my-1 h-px bg-neutral-100" />
+                  {domainList.map((d) => {
+                    const checked = selectedDomains.includes(d);
+                    return (
+                      <button
+                        key={d}
+                        onClick={() => toggleDomain(d)}
+                        className="flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm text-neutral-700 hover:bg-neutral-50"
+                      >
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${checked ? "border-sphere-core bg-sphere-core text-white" : "border-neutral-300"}`}>{checked && <Check size={11} strokeWidth={3} />}</span>
+                          <span className="truncate">{d}</span>
+                        </span>
+                        {domainVolumes[d]
+                          ? <span className="shrink-0 rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] font-semibold text-neutral-500">{fmt(domainVolumes[d])}</span>
+                          : <span className="shrink-0 text-[10px] text-neutral-300">no data</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+          <label className="flex items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-neutral-400">Range</span>
+            <select
+              value={windowDays === "all" ? "all" : String(windowDays)}
+              onChange={(e) => setWindowDays(e.target.value === "all" ? "all" : Number(e.target.value))}
+              disabled={refreshing}
+              className="rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-700 hover:bg-neutral-100 disabled:opacity-60"
+            >
+              {RANGES.map((r) => (
+                <option key={r.label} value={r.value === "all" ? "all" : String(r.value)}>{r.label}</option>
+              ))}
+            </select>
+          </label>
         </div>
 
         {/* upload — editors only; other users are read-only */}
@@ -781,7 +831,7 @@ export default function DashboardPage() {
                 const age = recordAge(rec);
                 return (
                   <div key={d} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-neutral-100 bg-neutral-50 px-3 py-2 text-sm">
-                    <button onClick={() => setDomain(d)} className="font-medium text-neutral-700 hover:text-sphere-secondary">{d}</button>
+                    <button onClick={() => setSelectedDomains([d])} className="font-medium text-neutral-700 hover:text-sphere-secondary">{d}</button>
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                       {!dnsLive && age != null && age > 30 && <span className="rounded bg-orange-100 px-1.5 py-0.5 text-[10px] font-semibold text-orange-700">verify — {age}d old</span>}
                       {rec?.spf && rec.spfLookups != null

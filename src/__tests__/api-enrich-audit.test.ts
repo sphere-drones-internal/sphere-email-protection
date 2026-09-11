@@ -21,6 +21,9 @@ const call = (ips: string[]) => enrichPost(new Request("http://localhost/api/enr
 const batchOk = (map: Record<string, unknown>) => vi.fn().mockResolvedValue({ ok: true, json: async () => map });
 
 beforeEach(() => {
+  // /api/enrich is editor-gated (write access). The mocked identity below must be
+  // on the EDITOR_EMAILS allowlist, or the route fails closed with 403.
+  process.env.EDITOR_EMAILS = "josh@spheregroup.com.au";
   process.env.IPINFO_TOKEN = "test-token";
   writeAudit.mockClear();
   findMany.mockClear().mockResolvedValue([]);
