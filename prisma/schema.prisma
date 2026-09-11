@@ -1,5 +1,9 @@
 generator client {
   provider = "prisma-client-js"
+  // The runtime image is Alpine (musl) with OpenSSL 3 — pin that query engine so
+  // the client loads a matching binary, not just the `native` one generated at
+  // build time. Without it Prisma can 500 at runtime hunting for an engine.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
