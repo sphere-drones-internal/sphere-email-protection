@@ -17,9 +17,11 @@
     }
   },
   "access": {
-    "model": "single-role",
-    "rationale": "One shared team dataset; every authorised user sees the same data. No in-app roles — Authentik group membership is the only gate.",
+    "model": "multi-role",
+    "rationale": "Authentik group membership (dmarc-dashboard-users) is the door — every authorised user reaches the app and sees the same shared dataset. Inside the app there are two roles over that one dataset: editors can write (upload/fetch/import/enrich), everyone else is read-only. Editors are an email allowlist from the EDITOR_EMAILS runtime secret (comma-separated), enforced server-side in every write route and fail-closed (unset/empty ⇒ nobody is an editor). Roles are not derived from Authentik group claims, so groupRoleMap is empty.",
     "authentikGroup": "dmarc-dashboard-users",
+    "roles": ["editor", "reader"],
+    "editorSource": "EDITOR_EMAILS runtime secret (email allowlist)",
     "groupRoleMap": {}
   },
   "data": {
